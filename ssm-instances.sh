@@ -10,8 +10,9 @@
 #     ProxyCommand sh -c "... export AWS_PROFILE=my-profile; ... aws ssm start-session ..."
 #
 # Usage:
-#   ssm-instances.sh                 # pick a host to start (fzf, or numbered menu)
-#   ssm-instances.sh pick stop       # pick a host to stop
+#   ssm-instances.sh                 # pick a host, flip its state (start/stop)
+#   ssm-instances.sh start           # picker, start only
+#   ssm-instances.sh stop            # picker, stop only
 #   ssm-instances.sh list            # table of EC2 state + SSM status
 #   ssm-instances.sh start <host>
 #   ssm-instances.sh stop  <host>
@@ -251,8 +252,8 @@ cmd_stop() {
 }
 
 cmd_pick() {
-  local action="${1:-start}" table host
-  case "$action" in start|stop) ;; *) echo "usage: $0 pick [start|stop]" >&2; exit 1 ;; esac
+  local action="${1:-toggle}" table host
+  case "$action" in toggle|start|stop) ;; *) echo "usage: $0 pick [toggle|start|stop]" >&2; exit 1 ;; esac
 
   echo "Loading instance states..." >&2
   table=$(cmd_list) || exit $?
@@ -290,11 +291,39 @@ cmd_pick() {
 
   [ -z "$host" ] && { echo "Cancelled." >&2; return 1; }
   echo "" >&2
+
+  # Toggle uses the state already fetched for the table, so deciding the action
+  # costs no extra API call.
+  if [ "$action" = "toggle" ]; then
+    local sel_state
+    sel_state=$(echo "$table" | awk -v h="$host" '$1 == h { print $3; exit }')
+    case "$sel_state" in
+      running)
+        # Stopping disconnects anyone working on the box, so make it deliberate.
+        printf "Stop %s? [y/N] " "$host" >&2
+        local reply; read -r reply
+        case "$reply" in
+          [yY]|[yY][eE][sS]) action=stop ;;
+          *) echo "Cancelled." >&2; return 1 ;;
+        esac
+        ;;
+      stopped)  action=start ;;
+      no-creds) action=start ;;   # log in first, then act on the real state
+      *)
+        echo "Cannot toggle $host (state: ${sel_state:-unknown})." >&2
+        echo "Use: $0 start $host   or   $0 stop $host" >&2
+        return 1
+        ;;
+    esac
+  fi
+
   cmd_"$action" "$host"
 }
 
 case "${1:-pick}" in
-  pick)  cmd_pick "${2:-start}" ;;
+  # Bare invocation: pick a host and flip its state (stopped -> start,
+  # running -> stop after confirming).
+  pick)  cmd_pick "${2:-toggle}" ;;
   list)  cmd_list ;;
   hosts) parse_hosts ;;
   # A bare `start`/`stop` means "start something" -- fall through to the picker
@@ -302,5 +331,5 @@ case "${1:-pick}" in
   start) [ $# -ge 2 ] && cmd_start "$2" || cmd_pick start ;;
   stop)  [ $# -ge 2 ] && cmd_stop  "$2" || cmd_pick stop  ;;
   -h|--help|help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *)     echo "usage: $0 {pick [start|stop]|list|start <host>|stop <host>|hosts}" >&2; exit 1 ;;
+  *)     echo "usage: $0 {pick [toggle|start|stop]|list|start <host>|stop <host>|hosts}" >&2; exit 1 ;;
 esac

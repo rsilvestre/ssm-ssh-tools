@@ -102,18 +102,25 @@ sshing too early fails because the SSM agent registers a minute or two after boo
 This script handles both.
 
 ```sh
-./ssm-instances.sh                 # pick a host to start (fzf, or a numbered menu)
-./ssm-instances.sh start           # same -- picker, then start
-./ssm-instances.sh stop            # picker, then stop
+./ssm-instances.sh                 # pick a host and flip its state
+./ssm-instances.sh start           # picker, start only
+./ssm-instances.sh stop            # picker, stop only
 ./ssm-instances.sh list            # table of EC2 state + SSM status
 ./ssm-instances.sh start <host>    # skip the picker
 ./ssm-instances.sh stop  <host>
 ./ssm-instances.sh hosts           # machine-readable host<TAB>instance<TAB>profile
 ```
 
-Naming a host skips the picker; leaving it off brings the picker up. Without a
-terminal (piped, or run from a script) the picker cannot run, so it tells you to
-name a host instead of hanging.
+A bare run is a **toggle**: pick a stopped host and it starts, pick a running one
+and it stops — after a `Stop <host>? [y/N]` confirmation, since stopping
+disconnects anyone working on that box. The state comes from the table it already
+fetched, so deciding costs no extra API call.
+
+`start` and `stop` stay single-direction: `start` never stops anything, which
+makes them safe in scripts and aliases.
+
+Naming a host skips the picker. Without a terminal (piped, or run from a script)
+the picker cannot run, so it tells you to name a host instead of hanging.
 
 ```
 $ ./ssm-instances.sh list
