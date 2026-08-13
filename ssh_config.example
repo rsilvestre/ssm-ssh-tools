@@ -1,0 +1,30 @@
+# Example ~/.ssh/config entries for SSH over AWS SSM.
+# Replace the instance ids, profiles, region, and user with your own.
+#
+# The ProxyCommand form below is deliberate -- see README.md for why each part
+# is needed. In short:
+#   sh -c "..."      ssh prepends `exec`, so multiple statements need a shell
+#   export PATH=...  GUI editors (VS Code / Cursor) launch with a minimal PATH
+#                    and cannot otherwise find session-manager-plugin
+#   literal PATH     `$PATH` expansion breaks on entries containing spaces
+#   >&2 on login     a ProxyCommand's stdout IS the SSH wire; banners corrupt it
+
+Host myproject-dev
+  HostName i-0123456789abcdef0
+  User ec2-user
+  Port 22
+  ForwardAgent yes
+  ServerAliveInterval 60
+  ServerAliveCountMax 4
+  ConnectTimeout 60
+  ProxyCommand sh -c "export PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin; export AWS_PROFILE=myproject-dev; export AWS_REGION=eu-west-1; aws sts get-caller-identity >/dev/null 2>&1 || aws sso login --profile myproject-dev >&2; exec aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p'"
+
+Host myproject-staging
+  HostName i-0fedcba987654321f
+  User ec2-user
+  Port 22
+  ForwardAgent yes
+  ServerAliveInterval 60
+  ServerAliveCountMax 4
+  ConnectTimeout 60
+  ProxyCommand sh -c "export PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin; export AWS_PROFILE=myproject-staging; export AWS_REGION=eu-west-1; aws sts get-caller-identity >/dev/null 2>&1 || aws sso login --profile myproject-staging >&2; exec aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p'"
