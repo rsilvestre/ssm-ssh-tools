@@ -131,6 +131,21 @@ ssm_status() {
   if [ -z "$s" ] || [ "$s" = "None" ]; then echo "-"; else echo "$s"; fi
 }
 
+# One host's row. Run as a background job by cmd_list, so it must not depend on
+# any shared state beyond its arguments.
+list_row() {
+  local host="$1" instance="$2" profile="$3" credfile="$4"
+  local ec2 ssm
+  HOST="$host"; INSTANCE="$instance"; PROFILE="$profile"
+  if grep -qx "$profile" "$credfile" 2>/dev/null; then
+    ec2=$(ec2_state); ssm=$(ssm_status)
+    if [ -z "$ec2" ] || [ "$ec2" = "None" ]; then ec2="missing"; fi
+  else
+    ec2="no-creds"; ssm="-"
+  fi
+  printf '%-34s %-21s %-12s %s\n' "$host" "$instance" "$ec2" "$ssm"
+}
+
 cmd_list() {
   local rows; rows=$(parse_hosts)
   [ -z "$rows" ] && {
@@ -138,17 +153,31 @@ cmd_list() {
     echo "Expected blocks with an i-* HostName and AWS_PROFILE= in the ProxyCommand." >&2
     exit 1
   }
-  printf '%-34s %-21s %-12s %s\n' HOST INSTANCE EC2 SSM
-  local ec2 ssm
-  while IFS=$'\t' read -r HOST INSTANCE PROFILE; do
-    if have_creds; then
-      ec2=$(ec2_state); ssm=$(ssm_status)
-      if [ -z "$ec2" ] || [ "$ec2" = "None" ]; then ec2="missing"; fi
-    else
-      ec2="no-creds"; ssm="-"
-    fi
-    printf '%-34s %-21s %-12s %s\n' "$HOST" "$INSTANCE" "$ec2" "$ssm"
+
+  local tmp; tmp=$(mktemp -d)
+
+  # Check each PROFILE once rather than once per host, and check them all
+  # concurrently. Serially this dominated the runtime.
+  local prof
+  while read -r prof; do
+    ( $AWS sts get-caller-identity --profile "$prof" --region "$REGION" >/dev/null 2>&1 \
+        && echo "$prof" >> "$tmp/creds" ) &
+  done < <(echo "$rows" | cut -f3 | sort -u)
+  wait
+  touch "$tmp/creds"
+
+  # Then fetch every host's state in parallel. Each writes its own numbered file
+  # so output keeps ssh-config order rather than completion order.
+  local i=0
+  while IFS=$'\t' read -r h inst pr; do
+    i=$((i + 1))
+    list_row "$h" "$inst" "$pr" "$tmp/creds" > "$tmp/row.$(printf '%03d' $i)" &
   done <<< "$rows"
+  wait
+
+  printf '%-34s %-21s %-12s %s\n' HOST INSTANCE EC2 SSM
+  cat "$tmp"/row.* 2>/dev/null
+  rm -rf "$tmp"
 }
 
 cmd_start() {
@@ -157,7 +186,15 @@ cmd_start() {
   echo "$HOST -> $INSTANCE ($PROFILE), state: $state"
 
   case "$state" in
-    running) echo "Already running." ;;
+    running)
+      # Already up: if SSM is live too there is nothing to wait for, so say it is
+      # ready and stop rather than re-running the whole boot-wait sequence.
+      if [ "$(ssm_status)" = "Online" ]; then
+        echo "Already running and Online. Connect with: ssh $HOST"
+        return 0
+      fi
+      echo "Already running, but SSM is not registered yet."
+      ;;
     ""|None) echo "Instance does not exist. Check the HostName in $SSH_CONFIG." >&2; exit 4 ;;
     *)
       $AWS ec2 start-instances --profile "$PROFILE" --region "$REGION" \
@@ -228,6 +265,15 @@ cmd_pick() {
     echo "here. Picking one will log in first." >&2
   fi
 
+  # Both pickers need a real terminal. Without this guard fzf blocks forever when
+  # stdin is a pipe or /dev/null, which is worse than failing outright.
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "" >&2
+    echo "No terminal for interactive selection. Name a host directly:" >&2
+    echo "  $0 $action <host>" >&2
+    exit 1
+  fi
+
   if command -v fzf >/dev/null 2>&1; then
     host=$(echo "$table" | tail -n +2 | \
       fzf --height=40% --reverse --prompt="$action which host? " \
@@ -251,8 +297,10 @@ case "${1:-pick}" in
   pick)  cmd_pick "${2:-start}" ;;
   list)  cmd_list ;;
   hosts) parse_hosts ;;
-  start) [ $# -ge 2 ] || { echo "usage: $0 start <host>" >&2; exit 1; }; cmd_start "$2" ;;
-  stop)  [ $# -ge 2 ] || { echo "usage: $0 stop <host>" >&2; exit 1; }; cmd_stop "$2" ;;
+  # A bare `start`/`stop` means "start something" -- fall through to the picker
+  # rather than making the user retype the command with a host name.
+  start) [ $# -ge 2 ] && cmd_start "$2" || cmd_pick start ;;
+  stop)  [ $# -ge 2 ] && cmd_stop  "$2" || cmd_pick stop  ;;
   -h|--help|help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)     echo "usage: $0 {pick [start|stop]|list|start <host>|stop <host>|hosts}" >&2; exit 1 ;;
 esac

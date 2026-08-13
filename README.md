@@ -103,12 +103,17 @@ This script handles both.
 
 ```sh
 ./ssm-instances.sh                 # pick a host to start (fzf, or a numbered menu)
-./ssm-instances.sh pick stop       # pick a host to stop
+./ssm-instances.sh start           # same -- picker, then start
+./ssm-instances.sh stop            # picker, then stop
 ./ssm-instances.sh list            # table of EC2 state + SSM status
-./ssm-instances.sh start <host>
+./ssm-instances.sh start <host>    # skip the picker
 ./ssm-instances.sh stop  <host>
 ./ssm-instances.sh hosts           # machine-readable host<TAB>instance<TAB>profile
 ```
+
+Naming a host skips the picker; leaving it off brings the picker up. Without a
+terminal (piped, or run from a script) the picker cannot run, so it tells you to
+name a host instead of hanging.
 
 ```
 $ ./ssm-instances.sh list
@@ -121,8 +126,13 @@ Host, instance id, and AWS profile all come from `~/.ssh/config` — there is no
 second inventory to maintain. A block is treated as an SSM host when it has both an
 `i-*` HostName and an `AWS_PROFILE=` in its ProxyCommand; everything else is ignored.
 
-`start` waits for the instance to run, polls until the SSM agent registers, then
-verifies ssh actually works. Two details that matter in practice:
+State lookups run concurrently, and each AWS profile is checked once rather than
+once per host — on an 8-host config that is the difference between ~20s and ~4s.
+
+`start` on an instance that is already running and Online returns straight away
+instead of repeating the boot wait. Otherwise it waits for the instance to run,
+polls until the SSM agent registers, then verifies ssh actually works. Two details
+that matter in practice:
 
 - **`Online` does not mean sessionable.** The agent registers with the control plane
   slightly before it accepts sessions, so a first attempt can still return
