@@ -252,9 +252,26 @@ cmd_stop() {
 }
 
 cmd_pick() {
-  local action="${1:-toggle}" table host
-  case "$action" in toggle|start|stop) ;; *) echo "usage: $0 pick [toggle|start|stop]" >&2; exit 1 ;; esac
+  local requested="${1:-toggle}" action table host
+  case "$requested" in toggle|start|stop) ;; *) echo "usage: $0 pick [toggle|start|stop]" >&2; exit 1 ;; esac
 
+  # Both pickers need a real terminal. Without this guard fzf blocks forever when
+  # stdin is a pipe or /dev/null, which is worse than failing outright.
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "" >&2
+    echo "No terminal for interactive selection. Name a host directly:" >&2
+    # `toggle` is picker-only, so suggest a real subcommand.
+    case "$requested" in
+      toggle) echo "  $0 start <host>   or   $0 stop <host>" >&2 ;;
+      *)      echo "  $0 $requested <host>" >&2 ;;
+    esac
+    exit 1
+  fi
+
+  # Loop so several hosts can be handled in one sitting. The table is re-fetched
+  # each pass because the host just acted on has a new state.
+  while :; do
+  action="$requested"
   echo "Loading instance states..." >&2
   table=$(cmd_list) || exit $?
   echo "$table" >&2
@@ -266,15 +283,6 @@ cmd_pick() {
     echo "here. Picking one will log in first." >&2
   fi
 
-  # Both pickers need a real terminal. Without this guard fzf blocks forever when
-  # stdin is a pipe or /dev/null, which is worse than failing outright.
-  if [ ! -t 0 ] || [ ! -t 1 ]; then
-    echo "" >&2
-    echo "No terminal for interactive selection. Name a host directly:" >&2
-    echo "  $0 $action <host>" >&2
-    exit 1
-  fi
-
   if command -v fzf >/dev/null 2>&1; then
     host=$(echo "$table" | tail -n +2 | \
       fzf --height=40% --reverse --prompt="$action which host? " \
@@ -284,12 +292,18 @@ cmd_pick() {
     hosts=$(echo "$table" | tail -n +2 | awk '{print $1}')
     echo "" >&2
     echo "$hosts" | nl -w2 -s') ' >&2
-    printf "%s which number? " "$action" >&2
+    printf "%s which number (Enter to quit)? " "$action" >&2
     read -r n
-    host=$(echo "$hosts" | sed -n "${n}p")
+    # Only a plain number selects; anything else (including empty) means quit.
+    # Without this an empty $n makes sed print every line, so $host is non-empty.
+    case "$n" in
+      ''|*[!0-9]*) host="" ;;
+      *) host=$(echo "$hosts" | sed -n "${n}p") ;;
+    esac
   fi
 
-  [ -z "$host" ] && { echo "Cancelled." >&2; return 1; }
+  # Empty selection (Esc in fzf, or a blank line) is how you leave the loop.
+  [ -z "$host" ] && { echo "Done." >&2; return 0; }
   echo "" >&2
 
   # Toggle uses the state already fetched for the table, so deciding the action
@@ -304,7 +318,8 @@ cmd_pick() {
         local reply; read -r reply
         case "$reply" in
           [yY]|[yY][eE][sS]) action=stop ;;
-          *) echo "Cancelled." >&2; return 1 ;;
+          # Declining returns to the list rather than quitting.
+          *) echo "Skipped." >&2; echo "" >&2; continue ;;
         esac
         ;;
       stopped)  action=start ;;
@@ -312,12 +327,22 @@ cmd_pick() {
       *)
         echo "Cannot toggle $host (state: ${sel_state:-unknown})." >&2
         echo "Use: $0 start $host   or   $0 stop $host" >&2
-        return 1
+        echo "" >&2
+        continue
         ;;
     esac
   fi
 
-  cmd_"$action" "$host"
+  # Keep going even if the action failed, so one bad host does not end the
+  # session; the refreshed table next pass shows what actually happened.
+  cmd_"$action" "$host" || echo "($action failed for $host)" >&2
+
+  echo "" >&2
+  printf -- "-- press Enter for the list, or q to quit -- " >&2
+  local again; read -r again
+  case "$again" in [qQ]*) echo "Done." >&2; return 0 ;; esac
+  echo "" >&2
+  done
 }
 
 case "${1:-pick}" in

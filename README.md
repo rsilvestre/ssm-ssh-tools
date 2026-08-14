@@ -116,6 +116,11 @@ and it stops — after a `Stop <host>? [y/N]` confirmation, since stopping
 disconnects anyone working on that box. The state comes from the table it already
 fetched, so deciding costs no extra API call.
 
+The picker loops. After an action it pauses so the result stays readable, then
+re-fetches the table — showing the new state — and asks again, so several hosts
+can be handled in one sitting. Press Enter on an empty selection (or Esc in fzf,
+or `q` at the pause) to leave.
+
 `start` and `stop` stay single-direction: `start` never stops anything, which
 makes them safe in scripts and aliases.
 
