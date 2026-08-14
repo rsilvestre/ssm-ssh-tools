@@ -189,6 +189,26 @@ SSM_HOST_PREFIX=myproject- ./ssm-instances.sh list
 Exit codes: `2` unknown host, `3` credentials, `4` instance missing, `5` API call
 failed, `6` timed out waiting for state, `7` SSM never registered.
 
+### Claude Code slash command (optional)
+
+[`claude-code/instance.md`](claude-code/instance.md) wraps the script as an
+`/instance` command for [Claude Code](https://claude.com/claude-code), for when
+you are already in a session and would rather not switch to a terminal:
+
+```sh
+mkdir -p ~/.claude/commands
+cp claude-code/instance.md ~/.claude/commands/
+```
+
+Edit the `SCRIPT=` line in the copied file to point at your clone. Then
+`/instance` shows the table and offers a pick-list, or `/instance <host>` and
+`/instance stop <host>` act directly.
+
+It always passes an explicit host to the script, since the script's own
+interactive picker needs a terminal. Note the pick-list is capped at 4 options —
+with more hosts than that, name the one you want directly. The shell picker has
+no such limit.
+
 ### IAM
 
 Starting and stopping needs `ec2:DescribeInstances`, `ec2:StartInstances`,
