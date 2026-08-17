@@ -11,6 +11,11 @@ Two independent parts. Take either one:
 2. **[`ssm-instances.sh`](#ssm-instancessh)** — start/stop the instances behind those
    ssh hosts, reading everything from `~/.ssh/config`.
 
+macOS and Linux use the bash script below. **On Windows, see
+[WINDOWS.md](WINDOWS.md)** — there is a PowerShell port (`ssm-instances.ps1`), plus
+notes on WSL2, Git Bash, and the Windows ProxyCommand form, which differs because
+`sh -c` is not available and the macOS PATH problem does not apply.
+
 ## The ProxyCommand
 
 Put this in `~/.ssh/config`, replacing `<profile>`, `<region>`, and the instance id:
