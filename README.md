@@ -153,8 +153,21 @@ recognised:
 `./ssm-instances.sh hosts` prints exactly what it matched, which is the quickest
 way to check a block it is ignoring.
 
-State lookups run concurrently, and each AWS profile is checked once rather than
-once per host — on an 8-host config that is the difference between ~20s and ~4s.
+State lookups are batched per AWS profile rather than per host. Both
+`describe-instances` and `describe-instance-information` accept a list of instance
+ids, so eight hosts sharing one profile cost 3 API calls instead of 17. Profiles
+are fetched concurrently, and within a profile the credential check and the two
+lookups all start together — what dominates here is `aws` CLI start-up, not the
+API, so overlapping them is worth more than it looks. On a config where every host
+has its own profile there is nothing to batch, but that overlap still cuts three
+sequential start-ups down to one.
+
+This matters most under Git Bash on Windows, where each `aws` invocation costs a
+second or more rather than a few hundred milliseconds — see [WINDOWS.md](WINDOWS.md).
+
+One unknown instance id fails an entire batched `describe-instances` call, so a
+profile whose batch fails falls back to per-host calls. A stale `HostName` costs
+that profile some speed instead of blanking out every row it owns.
 
 `start` on an instance that is already running and Online returns straight away
 instead of repeating the boot wait. Otherwise it waits for the instance to run,

@@ -182,19 +182,74 @@ ssm_status() {
   if [ -z "$s" ] || [ "$s" = "None" ]; then echo "-"; else echo "$s"; fi
 }
 
-# One host's row. Run as a background job by cmd_list, so it must not depend on
-# any shared state beyond its arguments.
-list_row() {
-  local host="$1" instance="$2" profile="$3" credfile="$4"
-  local ec2 ssm
-  HOST="$host"; INSTANCE="$instance"; PROFILE="$profile"
-  if grep -qx "$profile" "$credfile" 2>/dev/null; then
-    ec2=$(ec2_state); ssm=$(ssm_status)
-    if [ -z "$ec2" ] || [ "$ec2" = "None" ]; then ec2="missing"; fi
-  else
-    ec2="no-creds"; ssm="-"
+# Every state lookup for ONE profile, as "instance<TAB>ec2<TAB>ssm" lines.
+#
+# Both APIs accept many instance ids per call, so this costs 3 aws invocations
+# per profile instead of 1 + 2 per host. That matters far more than it looks:
+# nothing here is network-bound, it is aws CLI start-up, which is ~0.3s on macOS
+# but frequently 1-2s under Git Bash on Windows.
+#
+# Run as a background job by cmd_list, so it must not depend on any shared state
+# beyond its arguments.
+profile_states() {
+  local profile="$1" idfile="$2" out="$3"
+  local ids csv ec2f ssmf okf
+
+  ids=$(tr '\n' ' ' < "$idfile")
+  csv=$(paste -sd, - < "$idfile")
+  ec2f="$idfile.ec2"; ssmf="$idfile.ssm"; okf="$idfile.creds"
+
+  # All three calls start together. Start-up, not the API, is the cost here, so
+  # overlapping them makes a profile take one aws start-up instead of three --
+  # which is the entire runtime when each host has its own profile and there is
+  # nothing left to batch.
+  ( "$AWS" sts get-caller-identity --profile "$profile" --region "$REGION" >/dev/null 2>&1 \
+      && echo ok > "$okf" ) &
+
+  # Word-splitting $ids into separate --instance-ids arguments is the point here.
+  # shellcheck disable=SC2086
+  "$AWS" ec2 describe-instances --profile "$profile" --region "$REGION" \
+    --instance-ids $ids \
+    --query 'Reservations[].Instances[].[InstanceId,State.Name]' \
+    --output text > "$ec2f" 2>/dev/null &
+
+  # describe-instance-information simply omits ids it does not know, so it needs
+  # no fallback -- a missing row means "not registered", which reads as "-".
+  "$AWS" ssm describe-instance-information --profile "$profile" --region "$REGION" \
+    --filters "Key=InstanceIds,Values=$csv" \
+    --query 'InstanceInformationList[].[InstanceId,PingStatus]' \
+    --output text > "$ssmf" 2>/dev/null &
+  wait
+
+  # Credentials decide whether the other two results mean anything, so this is
+  # checked after rather than gating them.
+  if [ ! -s "$okf" ]; then
+    awk '{ print $1 "\tno-creds\t-" }' "$idfile" > "$out"
+    return
   fi
-  printf '%-34s %-21s %-12s %s\n' "$host" "$instance" "$ec2" "$ssm"
+
+  # One unknown id fails the WHOLE describe-instances call, which would blank out
+  # every row on this profile. Fall back to per-host calls just for this profile,
+  # so a stale HostName costs speed rather than the whole table.
+  if [ ! -s "$ec2f" ]; then
+    local i st
+    while read -r i; do
+      st=$("$AWS" ec2 describe-instances --profile "$profile" --region "$REGION" \
+             --instance-ids "$i" \
+             --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null)
+      printf '%s\t%s\n' "$i" "$st"
+    done < "$idfile" > "$ec2f"
+  fi
+
+  # Drive the join from idfile so every host gets a row even when both APIs
+  # omitted it.
+  awk -F'\t' -v e="$ec2f" -v s="$ssmf" '
+    function val(v) { return (v == "" || v == "None") ? "" : v }
+    FILENAME == e { ec2[$1] = val($2); next }
+    FILENAME == s { ssm[$1] = val($2); next }
+    { print $1 "\t" (ec2[$1] == "" ? "missing" : ec2[$1]) \
+               "\t" (ssm[$1] == "" ? "-" : ssm[$1]) }
+  ' "$ec2f" "$ssmf" "$idfile" > "$out"
 }
 
 cmd_list() {
@@ -208,27 +263,27 @@ cmd_list() {
 
   local tmp; tmp=$(mktemp -d)
 
-  # Check each PROFILE once rather than once per host, and check them all
-  # concurrently. Serially this dominated the runtime.
-  local prof
+  # One background job per profile, not per host, each fetching that profile's
+  # whole slice of the table.
+  local n=0 prof
   while read -r prof; do
-    ( "$AWS" sts get-caller-identity --profile "$prof" --region "$REGION" >/dev/null 2>&1 \
-        && echo "$prof" >> "$tmp/creds" ) &
+    n=$((n + 1))
+    echo "$rows" | awk -F'\t' -v p="$prof" '$3 == p { print $2 }' > "$tmp/ids.$n"
+    profile_states "$prof" "$tmp/ids.$n" "$tmp/state.$n" &
   done < <(echo "$rows" | cut -f3 | sort -u)
   wait
-  touch "$tmp/creds"
 
-  # Then fetch every host's state in parallel. Each writes its own numbered file
-  # so output keeps ssh-config order rather than completion order.
-  local i=0
-  while IFS=$'\t' read -r h inst pr; do
-    i=$((i + 1))
-    list_row "$h" "$inst" "$pr" "$tmp/creds" > "$tmp/row.$(printf '%03d' $i)" &
-  done <<< "$rows"
-  wait
+  cat "$tmp"/state.* > "$tmp/all" 2>/dev/null
+  touch "$tmp/all"
 
+  # Print in ssh-config order by walking the parsed rows, not the fetched state.
   printf '%-34s %-21s %-12s %s\n' HOST INSTANCE EC2 SSM
-  cat "$tmp"/row.* 2>/dev/null
+  echo "$rows" | awk -F'\t' -v all="$tmp/all" '
+    BEGIN { while ((getline line < all) > 0) {
+              split(line, f, "\t"); ec2[f[1]] = f[2]; ssm[f[1]] = f[3] } }
+    { printf "%-34s %-21s %-12s %s\n", $1, $2,
+             (ec2[$2] == "" ? "?" : ec2[$2]), (ssm[$2] == "" ? "-" : ssm[$2]) }
+  '
   rm -rf "$tmp"
 }
 

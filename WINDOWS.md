@@ -285,9 +285,11 @@ Windows — the Linux binaries are what the WSL script invokes.
 The bash script also runs under Git Bash, with two caveats worth knowing before
 you rely on it:
 
-- `Start-Job`-style parallelism is fine (Git Bash has real subshells), but
-  process creation on Windows is slow, so `list` will be noticeably slower than
-  on macOS or WSL.
+- Process creation on Windows is slow, and the AWS CLI v2 is a frozen Python app
+  that costs a second or more per start where macOS pays a few hundred
+  milliseconds. `list` batches its lookups per profile and overlaps them to keep
+  that count down, but it will still feel slower here than on macOS or WSL.
+  `SSM_HOST_PREFIX` narrows the table further if you only care about a few hosts.
 - Git Bash mangles arguments that look like paths. The script does not pass any,
   but if you hit odd behaviour, prefix the command with `MSYS_NO_PATHCONV=1`.
 
