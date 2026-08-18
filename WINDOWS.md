@@ -295,12 +295,35 @@ you rely on it:
 MSYS_NO_PATHCONV=1 ./ssm-instances.sh list
 ```
 
+### Arrow-key selection needs fzf
+
+The picker has two modes, chosen by whether `fzf` is on `PATH`: with it you get a
+filterable list you navigate with the arrow keys, without it a numbered menu you
+type a number into. Both select the same hosts — only the interaction differs.
+
+Git for Windows does not bundle `fzf`, so the numbered menu is what you get out of
+the box. Installing it needs no admin rights: take `fzf-*-windows_amd64.zip` from
+the [releases page](https://github.com/junegunn/fzf/releases) and drop the binary
+in `~/bin`, which Git Bash already has on `PATH`.
+
+```bash
+mkdir -p ~/bin && unzip -j ~/Downloads/fzf-*-windows_amd64.zip fzf.exe -d ~/bin
+fzf --version
+```
+
+Open a new Git Bash session and the script switches modes on its own. `winget
+install fzf` works too, where winget is available to you.
+
+This applies to the bash script only. `ssm-instances.ps1` has no `fzf` support at
+all and always uses the numbered menu.
+
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | `No SSM hosts found in …` | the block has no `i-*` HostName, or names no profile. See [what the script reads](#what-ssm-instances-reads-from-these), and check with `./ssm-instances.sh hosts`. |
 | `aws CLI not found on PATH` | hand-installed somewhere else — set `SSM_AWS_BIN`, or [put it on PATH](#putting-a-hand-installed-tool-on-path) |
+| picker asks for a number instead of arrow keys | `fzf` is not on `PATH` — see [arrow-key selection](#arrow-key-selection-needs-fzf) |
 | `SessionManagerPlugin is not found` | plugin not installed, or not on `PATH`. Reopen the terminal after installing — `PATH` changes need a fresh process. |
 | `aws : The term 'aws' is not recognized` | AWS CLI not on `PATH`; reopen the terminal after install. |
 | `.ps1 cannot be loaded because running scripts is disabled` | see the execution-policy note above |
