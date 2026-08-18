@@ -9,10 +9,11 @@ nothing extra installed; WSL2 is the closest to the macOS/Linux experience.
 | [WSL2](#wsl2) | WSL2 + a distro | `ssm-instances.sh` |
 | [Git Bash](#git-bash) | Git for Windows | `ssm-instances.sh` |
 
-> **Status: untested on Windows.** The PowerShell port and the ProxyCommand forms
-> below were written by mirroring the bash version, but have not been run on a
-> Windows machine. The ssh-config parser was verified to select the same hosts as
-> the bash implementation. Please report anything that misbehaves.
+> **Status: partly verified.** The parser handles the Windows config dialects
+> documented below — quoted `HostName`, `--profile`, CRLF line endings — each
+> covered by a fixture, though those run on Linux rather than under Git Bash. The
+> PowerShell port is still unrun on Windows; it mirrors the bash version rather
+> than having been exercised. Please report anything that misbehaves.
 
 ## Prerequisites (all routes)
 
@@ -28,6 +29,84 @@ missing `session-manager-plugin`:
 aws --version
 session-manager-plugin --version
 ```
+
+### Without admin rights
+
+Plenty of organisations do not let you write to `Program Files`. The two tools
+differ here, so treat them separately.
+
+**AWS CLI — no admin needed.** AWS ships a current-user install that lands in
+`%LOCALAPPDATA%\Programs\Amazon\AWSCLIV2` and puts itself on your user `PATH`:
+
+```powershell
+irm https://awscli.amazonaws.com/v2/install.ps1 | iex
+```
+
+There is also a current-user MSI, and it accepts an `INSTALLDIR` if you want the
+files somewhere specific — for example under your home directory:
+
+```powershell
+msiexec.exe /i https://awscli.amazonaws.com/AWSCLIV2-User.msi /qn
+msiexec.exe /i https://awscli.amazonaws.com/AWSCLIV2-User.msi INSTALLDIR="$HOME\awscli" /qn
+```
+
+`INSTALLDIR` appends `Amazon\AWSCLIV2`, so the second command puts `aws.exe` at
+`%USERPROFILE%\awscli\Amazon\AWSCLIV2\aws.exe`. Either way, update it later
+with `aws update` rather than re-running the installer.
+
+**Session Manager plugin — admin is required.** AWS states plainly that its
+installer needs Administrator rights, and the `.zip` download is just the same
+installer zipped, not a portable binary. There is no supported no-admin route, so
+this one goes to whoever holds admin on the machine:
+
+```
+https://s3.amazonaws.com/session-manager-downloads/plugin/latest/windows/SessionManagerPluginSetup.exe
+```
+
+It installs to `%PROGRAMFILES%\Amazon\SessionManagerPlugin\bin\`, and its
+install dialog accepts a different location if `Program Files` is off-limits.
+Whatever directory it lands in must be on `PATH`, because the AWS CLI looks the
+plugin up there itself — see [the PATH gotcha](README.md#why-it-is-written-that-way).
+
+Until it is installed, `list`, `start`, and `stop` all work; only the ssh
+connection itself fails.
+
+### Putting a hand-installed tool on PATH
+
+A manual install often does not touch `PATH`. To set it permanently for your user
+(no admin, survives reboots — reopen the terminal afterwards):
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  'PATH',
+  [Environment]::GetEnvironmentVariable('PATH', 'User') + ';' + "$HOME\awscli\Amazon\AWSCLIV2",
+  'User')
+```
+
+Git Bash reads that same user `PATH`. If you would rather keep it shell-local, add
+this to `~/.bashrc` instead — note the Git Bash spelling of the path:
+
+```bash
+export PATH="$PATH:/c/Users/<you>/awscli/Amazon/AWSCLIV2"
+```
+
+GUI apps such as VS Code only pick up a changed user `PATH` on a full restart —
+and, on some Windows builds, only after signing out and back in.
+
+**Or skip `PATH` for the script entirely.** If `aws` is installed somewhere
+awkward and you do not want to touch `PATH`, point the script straight at it:
+
+```bash
+SSM_AWS_BIN=/c/Users/<you>/awscli/Amazon/AWSCLIV2/aws ./ssm-instances.sh list
+```
+
+```powershell
+$env:SSM_AWS_BIN = "$HOME\awscli\Amazon\AWSCLIV2\aws.exe"
+```
+
+This covers the script only. The ProxyCommand is run by `ssh`, not by the script,
+so `ssh` itself still needs `aws` and `session-manager-plugin` on `PATH` — or an
+absolute path written into the ProxyCommand.
 
 ## The ProxyCommand on Windows
 
@@ -82,6 +161,41 @@ this needs Git for Windows installed:
 The `>&2` still matters for exactly the reason it does on macOS: a ProxyCommand's
 stdout is the SSH wire, and a login banner written there corrupts the handshake.
 
+Or use PowerShell as the shell, which needs nothing extra installed:
+
+```
+  ProxyCommand powershell.exe "aws --profile my-profile sts get-caller-identity > $null 2>&1; if ($LASTEXITCODE -ne 0) { aws sso login --profile my-profile | ForEach-Object { [Console]::Error.WriteLine($_) } }; aws --profile my-profile --region eu-west-1 ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p"
+```
+
+Mind the redirect on the login. PowerShell has no `1>&2`, so the `>&2` used in the
+`sh -c` forms above does not translate, and a bare `aws sso login` inside a
+ProxyCommand writes its device code and URL straight onto the SSH wire — giving
+you `Connection closed by UNKNOWN port 65535` instead of a login prompt, exactly
+[gotcha 4](README.md#why-it-is-written-that-way) in PowerShell dress. Piping
+through `[Console]::Error.WriteLine` is the equivalent move: the code and URL
+still reach your screen, on stderr, where they cannot corrupt the handshake.
+`| Out-Null` also protects the wire, but then an expired token logs in silently
+with nothing shown.
+
+### What `ssm-instances` reads from these
+
+The script treats a block as an SSM host only when it can find **both** an `i-*`
+`HostName` and an AWS profile in it. Profiles are read from either spelling, so
+`SetEnv AWS_PROFILE=…`, `export AWS_PROFILE=…`, `$env:AWS_PROFILE=…`, and
+`--profile …` / `--profile=…` anywhere in the block all work, as do quoted values
+like `HostName "i-0123456789abcdef0"`.
+
+The one form it cannot use is the very first one on this page — the plain
+ProxyCommand with no profile named anywhere, relying on `AWS_PROFILE` being set in
+your environment. There is nothing in the block to read, so the script skips the
+host. Add `SetEnv AWS_PROFILE=…` or `--profile …` to make it visible.
+
+Check what it sees with:
+
+```bash
+./ssm-instances.sh hosts     # one host<TAB>instance<TAB>profile row per SSM host
+```
+
 ## PowerShell (native)
 
 Works in Windows PowerShell 5.1 and PowerShell 7+.
@@ -123,6 +237,7 @@ by environment variable, same names as the bash version:
 $env:SSM_REGION = 'eu-west-1'
 $env:SSM_HOST_PREFIX = 'myproject-'
 $env:SSM_SSH_CONFIG = "$HOME\.ssh\config"
+$env:SSM_AWS_BIN = "$HOME\awscli\Amazon\AWSCLIV2\aws.exe"   # if aws is not on PATH
 ```
 
 A convenience function for your profile (`notepad $PROFILE`):
@@ -184,6 +299,8 @@ MSYS_NO_PATHCONV=1 ./ssm-instances.sh list
 
 | Symptom | Fix |
 |---|---|
+| `No SSM hosts found in …` | the block has no `i-*` HostName, or names no profile. See [what the script reads](#what-ssm-instances-reads-from-these), and check with `./ssm-instances.sh hosts`. |
+| `aws CLI not found on PATH` | hand-installed somewhere else — set `SSM_AWS_BIN`, or [put it on PATH](#putting-a-hand-installed-tool-on-path) |
 | `SessionManagerPlugin is not found` | plugin not installed, or not on `PATH`. Reopen the terminal after installing — `PATH` changes need a fresh process. |
 | `aws : The term 'aws' is not recognized` | AWS CLI not on `PATH`; reopen the terminal after install. |
 | `.ps1 cannot be loaded because running scripts is disabled` | see the execution-policy note above |

@@ -141,7 +141,17 @@ myproject-staging                  i-0fedcba987654321f   stopped      -
 
 Host, instance id, and AWS profile all come from `~/.ssh/config` — there is no
 second inventory to maintain. A block is treated as an SSM host when it has both an
-`i-*` HostName and an `AWS_PROFILE=` in its ProxyCommand; everything else is ignored.
+`i-*` HostName and a profile named somewhere in the block; everything else is
+ignored. Both fields are written differently across platforms, so all of these are
+recognised:
+
+| Field | Forms accepted |
+|---|---|
+| instance | `HostName i-0123…`, `HostName "i-0123…"` |
+| profile | `export AWS_PROFILE=p`, `SetEnv AWS_PROFILE=p`, `$env:AWS_PROFILE='p'`, `--profile p`, `--profile=p` |
+
+`./ssm-instances.sh hosts` prints exactly what it matched, which is the quickest
+way to check a block it is ignoring.
 
 State lookups run concurrently, and each AWS profile is checked once rather than
 once per host — on an 8-host config that is the difference between ~20s and ~4s.
@@ -186,6 +196,7 @@ without it you get a numbered menu.
 | `SSM_REGION` | `aws configure get region`, else `us-east-1` | AWS region |
 | `SSM_HOST_PREFIX` | *(unset — matches all SSM hosts)* | only consider hosts starting with this |
 | `SSM_SSH_CONFIG` | `~/.ssh/config` | path to the ssh config |
+| `SSM_AWS_BIN` | *(whatever `aws` is on `PATH`)* | the `aws` binary, for hand-installed CLIs that never landed on `PATH` |
 
 ```sh
 SSM_HOST_PREFIX=myproject- ./ssm-instances.sh list

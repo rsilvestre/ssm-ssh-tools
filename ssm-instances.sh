@@ -9,6 +9,12 @@
 #     HostName i-0123456789abcdef0
 #     ProxyCommand sh -c "... export AWS_PROFILE=my-profile; ... aws ssm start-session ..."
 #
+# ...and with the Windows spelling of the same thing:
+#
+#   Host myproject-dev
+#     HostName "i-0123456789abcdef0"
+#     ProxyCommand powershell.exe "aws --profile my-profile ssm start-session ..."
+#
 # Usage:
 #   ssm-instances.sh                 # pick a host, flip its state (start/stop)
 #   ssm-instances.sh start           # picker, start only
@@ -22,6 +28,7 @@
 #   SSM_REGION        AWS region                    (default: from aws config, else us-east-1)
 #   SSM_HOST_PREFIX   ssh host name prefix to match (default: matches any host with an i-* HostName)
 #   SSM_SSH_CONFIG    path to ssh config            (default: ~/.ssh/config)
+#   SSM_AWS_BIN       path to the aws binary        (default: whatever is on PATH)
 #
 # Exit codes: 2 unknown host, 3 credentials, 4 instance missing, 5 API call failed,
 #             6 timed out waiting for state, 7 SSM never registered.
@@ -32,43 +39,86 @@ SSH_CONFIG="${SSM_SSH_CONFIG:-$HOME/.ssh/config}"
 HOST_PREFIX="${SSM_HOST_PREFIX:-}"
 export AWS_PAGER=''
 
-AWS=$(command -v aws) || { echo "aws CLI not found on PATH." >&2; exit 1; }
+# A hand-installed AWS CLI -- the usual outcome where policy forbids writing to
+# Program Files -- often never lands on PATH. SSM_AWS_BIN points straight at the
+# binary so the script works without one.
+if [ -n "${SSM_AWS_BIN:-}" ]; then
+  AWS="$SSM_AWS_BIN"
+else
+  AWS=$(command -v aws) || {
+    echo "aws CLI not found on PATH." >&2
+    echo "If it is installed elsewhere, point at it directly:" >&2
+    echo "  SSM_AWS_BIN=/path/to/aws $0 ${1:-list}" >&2
+    exit 1
+  }
+fi
+
+# Run it rather than testing the file: under Git Bash the real file is aws.exe,
+# so an -x test on the extensionless path is not reliable.
+"$AWS" --version >/dev/null 2>&1 || {
+  echo "Cannot run the aws CLI at: $AWS" >&2
+  exit 1
+}
 
 if ! command -v session-manager-plugin >/dev/null 2>&1; then
   echo "Warning: session-manager-plugin not found on PATH; ssh over SSM will fail." >&2
+  echo "  (list/start/stop still work -- only the ssh connection itself needs it.)" >&2
   echo "  https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html" >&2
 fi
 
 # Region: explicit override, else whatever the aws CLI is configured with.
-REGION="${SSM_REGION:-$($AWS configure get region 2>/dev/null)}"
+REGION="${SSM_REGION:-$("$AWS" configure get region 2>/dev/null)}"
 REGION="${REGION:-us-east-1}"
 
 [ -f "$SSH_CONFIG" ] || { echo "ssh config not found: $SSH_CONFIG" >&2; exit 1; }
 
 # Turn ssh config blocks into "host<TAB>instance<TAB>profile" rows. A block only
-# counts when it has BOTH an i-* HostName and an AWS_PROFILE in its ProxyCommand,
+# counts when it has BOTH an i-* HostName and a profile somewhere in the block,
 # which is what distinguishes an SSM host from an ordinary one.
+#
+# Both fields are written several ways in the wild, so accept all of them:
+#   HostName i-0123...            HostName "i-0123..."      (Windows configs quote)
+#   export AWS_PROFILE=p          SetEnv AWS_PROFILE=p      ($env:AWS_PROFILE='p')
+#   aws --profile p ...           aws --profile=p ...       (the Windows/PowerShell form)
+# Rows are emitted at the end of a block rather than on the profile line, so the
+# two can appear in either order.
 parse_hosts() {
   awk -v prefix="$HOST_PREFIX" '
-    /^[Hh]ost / {
-      host = ""
+    function unquote(v) { gsub(/^["\047]+|["\047]+$/, "", v); return v }
+    function emit() {
+      if (host != "" && inst != "" && prof != "") print host "\t" inst "\t" prof
+      host = ""; inst = ""; prof = ""
+    }
+    { sub(/\r$/, "") }                                   # configs saved on Windows are CRLF
+    /^[[:space:]]*[Hh]ost[[:space:]]/ {
+      emit()
       for (i = 2; i <= NF; i++) {
-        if ($i ~ /[*?]/) continue                      # skip wildcard blocks
-        if (prefix == "" || index($i, prefix) == 1) { host = $i; break }
+        if ($i ~ /[*?]/) continue                        # skip wildcard blocks
+        cand = unquote($i)
+        if (prefix == "" || index(cand, prefix) == 1) { host = cand; break }
       }
-      inst = ""; prof = ""
       next
     }
     host == "" { next }
-    /^[[:space:]]*[Hh]ost[Nn]ame[[:space:]]+i-/ { inst = $2; next }
-    /AWS_PROFILE=/ {
-      line = $0
-      sub(/.*AWS_PROFILE=/, "", line)
-      sub(/[;"].*/, "", line)
-      gsub(/[[:space:]]/, "", line)
-      prof = line
-      if (inst != "" && prof != "") { print host "\t" inst "\t" prof; host = "" }
+    /^[[:space:]]*[Hh]ost[Nn]ame[[:space:]]/ {
+      cand = unquote($2)
+      if (cand ~ /^i-[0-9a-fA-F]+$/) inst = cand
+      next
     }
+    # First profile mentioned in the block wins; a ProxyCommand naming it three
+    # times (sts / sso login / start-session) names the same one each time.
+    prof == "" {
+      if (match($0, /AWS_PROFILE[[:space:]]*=[[:space:]]*["\047]?[A-Za-z0-9._+@-]+/)) {
+        v = substr($0, RSTART, RLENGTH)
+        sub(/^AWS_PROFILE[[:space:]]*=[[:space:]]*["\047]?/, "", v)
+        prof = v
+      } else if (match($0, /--profile[[:space:]=]+["\047]?[A-Za-z0-9._+@-]+/)) {
+        v = substr($0, RSTART, RLENGTH)
+        sub(/^--profile[[:space:]=]+["\047]?/, "", v)
+        prof = v
+      }
+    }
+    END { emit() }
   ' "$SSH_CONFIG"
 }
 
@@ -87,7 +137,7 @@ resolve() {
 }
 
 have_creds() {
-  $AWS sts get-caller-identity --profile "$PROFILE" --region "$REGION" >/dev/null 2>&1
+  "$AWS" sts get-caller-identity --profile "$PROFILE" --region "$REGION" >/dev/null 2>&1
 }
 
 # Mirrors the `|| aws sso login` fallback in the ProxyCommand: refresh the token
@@ -104,7 +154,7 @@ check_creds() {
   fi
 
   echo "Credentials expired for $PROFILE -- attempting sso login..." >&2
-  if ! $AWS sso login --profile "$PROFILE" >&2; then
+  if ! "$AWS" sso login --profile "$PROFILE" >&2; then
     echo "sso login failed for $PROFILE." >&2
     echo "If this profile does not use SSO, refresh its credentials manually." >&2
     exit 3
@@ -119,14 +169,14 @@ check_creds() {
 }
 
 ec2_state() {
-  $AWS ec2 describe-instances --profile "$PROFILE" --region "$REGION" \
+  "$AWS" ec2 describe-instances --profile "$PROFILE" --region "$REGION" \
     --instance-ids "$INSTANCE" \
     --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null
 }
 
 ssm_status() {
   local s
-  s=$($AWS ssm describe-instance-information --profile "$PROFILE" --region "$REGION" \
+  s=$("$AWS" ssm describe-instance-information --profile "$PROFILE" --region "$REGION" \
     --filters "Key=InstanceIds,Values=$INSTANCE" \
     --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)
   if [ -z "$s" ] || [ "$s" = "None" ]; then echo "-"; else echo "$s"; fi
@@ -151,7 +201,8 @@ cmd_list() {
   local rows; rows=$(parse_hosts)
   [ -z "$rows" ] && {
     echo "No SSM hosts found in $SSH_CONFIG." >&2
-    echo "Expected blocks with an i-* HostName and AWS_PROFILE= in the ProxyCommand." >&2
+    echo "Expected blocks with an i-* HostName and a profile -- either AWS_PROFILE=" >&2
+    echo "in the block (export/SetEnv/\$env:) or --profile in the ProxyCommand." >&2
     exit 1
   }
 
@@ -161,7 +212,7 @@ cmd_list() {
   # concurrently. Serially this dominated the runtime.
   local prof
   while read -r prof; do
-    ( $AWS sts get-caller-identity --profile "$prof" --region "$REGION" >/dev/null 2>&1 \
+    ( "$AWS" sts get-caller-identity --profile "$prof" --region "$REGION" >/dev/null 2>&1 \
         && echo "$prof" >> "$tmp/creds" ) &
   done < <(echo "$rows" | cut -f3 | sort -u)
   wait
@@ -198,10 +249,10 @@ cmd_start() {
       ;;
     ""|None) echo "Instance does not exist. Check the HostName in $SSH_CONFIG." >&2; exit 4 ;;
     *)
-      $AWS ec2 start-instances --profile "$PROFILE" --region "$REGION" \
+      "$AWS" ec2 start-instances --profile "$PROFILE" --region "$REGION" \
         --instance-ids "$INSTANCE" --output text >/dev/null || exit 5
       echo "Starting; waiting for running state..."
-      $AWS ec2 wait instance-running --profile "$PROFILE" --region "$REGION" \
+      "$AWS" ec2 wait instance-running --profile "$PROFILE" --region "$REGION" \
         --instance-ids "$INSTANCE" || { echo "Timed out waiting for running." >&2; exit 6; }
       echo "Running."
       ;;
@@ -244,10 +295,10 @@ cmd_stop() {
   echo "$HOST -> $INSTANCE ($PROFILE), state: $state"
   [ "$state" = "stopped" ] && { echo "Already stopped."; return 0; }
   [ -z "$state" ] || [ "$state" = "None" ] && { echo "Instance does not exist." >&2; exit 4; }
-  $AWS ec2 stop-instances --profile "$PROFILE" --region "$REGION" \
+  "$AWS" ec2 stop-instances --profile "$PROFILE" --region "$REGION" \
     --instance-ids "$INSTANCE" --output text >/dev/null || exit 5
   echo "Stopping; waiting..."
-  $AWS ec2 wait instance-stopped --profile "$PROFILE" --region "$REGION" \
+  "$AWS" ec2 wait instance-stopped --profile "$PROFILE" --region "$REGION" \
     --instance-ids "$INSTANCE" && echo "Stopped."
 }
 

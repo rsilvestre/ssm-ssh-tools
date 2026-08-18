@@ -10,6 +10,12 @@
       HostName i-0123456789abcdef0
       ProxyCommand ... export AWS_PROFILE=my-profile; ... aws ssm start-session ...
 
+  ...and the Windows spelling of the same thing:
+
+    Host myproject-dev
+      HostName "i-0123456789abcdef0"
+      ProxyCommand powershell.exe "aws --profile my-profile ssm start-session ..."
+
   Behavioural twin of ssm-instances.sh, including its exit codes. Requires
   PowerShell 5.1+ (Windows PowerShell) or PowerShell 7+ (any platform).
 
@@ -32,6 +38,7 @@
     SSM_REGION       AWS region       (default: aws configure get region, else us-east-1)
     SSM_HOST_PREFIX  host prefix filter (default: any host with an i-* HostName)
     SSM_SSH_CONFIG   ssh config path  (default: ~/.ssh/config)
+    SSM_AWS_BIN      path to aws.exe  (default: whatever is on PATH)
 
   Exit codes: 2 unknown host, 3 credentials, 4 instance missing,
               5 API call failed, 6 timed out waiting, 7 SSM never registered.
@@ -57,15 +64,36 @@ $SshConfig = if ($env:SSM_SSH_CONFIG) { $env:SSM_SSH_CONFIG }
              else { Join-Path $HOME '.ssh/config' }
 $HostPrefix = if ($env:SSM_HOST_PREFIX) { $env:SSM_HOST_PREFIX } else { '' }
 
-$AwsCmd = Get-Command aws -ErrorAction SilentlyContinue
-if (-not $AwsCmd) {
-  Write-Error 'aws CLI not found on PATH.'
+# A hand-installed AWS CLI -- the usual outcome where policy forbids writing to
+# Program Files -- often never lands on PATH. SSM_AWS_BIN points straight at the
+# binary so the script works without one.
+if ($env:SSM_AWS_BIN) {
+  $Aws = $env:SSM_AWS_BIN
+} else {
+  $AwsCmd = Get-Command aws -ErrorAction SilentlyContinue
+  if (-not $AwsCmd) {
+    Write-Host 'aws CLI not found on PATH.' -ForegroundColor Red
+    Write-Host 'If it is installed elsewhere, point at it directly:'
+    Write-Host '  $env:SSM_AWS_BIN = "C:\path\to\aws.exe"'
+    exit 1
+  }
+  $Aws = $AwsCmd.Source
+}
+
+# Run it rather than testing the path, so a wrong SSM_AWS_BIN fails here with a
+# clear message instead of at the first API call.
+# ErrorActionPreference is Stop, so a bad path throws rather than setting an
+# exit code -- catch it so the message below is what the user actually sees.
+$awsOk = $false
+try { & $Aws --version *> $null; $awsOk = ($LASTEXITCODE -eq 0) } catch { $awsOk = $false }
+if (-not $awsOk) {
+  Write-Host "Cannot run the aws CLI at: $Aws" -ForegroundColor Red
   exit 1
 }
-$Aws = $AwsCmd.Source
 
 if (-not (Get-Command session-manager-plugin -ErrorAction SilentlyContinue)) {
   Write-Warning 'session-manager-plugin not found on PATH; ssh over SSM will fail.'
+  Write-Warning '  (list/start/stop still work -- only the ssh connection itself needs it.)'
   Write-Warning '  https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html'
 }
 
@@ -79,20 +107,40 @@ if (-not (Test-Path -LiteralPath $SshConfig)) {
 }
 
 # --- ssh config parsing -----------------------------------------------------
-
-# A block counts as an SSM host only when it has BOTH an i-* HostName and an
-# AWS_PROFILE in its ProxyCommand; that is what separates these from ordinary
+# A block counts as an SSM host only when it has BOTH an i-* HostName and a
+# profile somewhere in the block; that is what separates these from ordinary
 # ssh hosts.
+#
+# Both fields are written several ways in the wild, so accept all of them:
+#   HostName i-0123...      HostName "i-0123..."   (Windows configs quote)
+#   AWS_PROFILE=p           SetEnv AWS_PROFILE=p   ($env:AWS_PROFILE='p')
+#   aws --profile p ...     aws --profile=p ...    (the Windows/PowerShell form)
+# Rows are emitted at the end of a block rather than on the profile line, so the
+# two can appear in either order. Kept in step with parse_hosts() in the bash
+# version -- both must select the same hosts from the same config.
 function Get-SsmHosts {
   $rows = [System.Collections.Generic.List[object]]::new()
   $hostName = ''; $instance = ''; $profileName = ''
 
+  # Values are passed in rather than captured, so this depends on nothing but
+  # its arguments and $rows.
+  $emit = {
+    param($h, $i, $p)
+    if ($h -and $i -and $p) {
+      $rows.Add([pscustomobject]@{ HostName = $h; Instance = $i; Profile = $p })
+    }
+  }
+
   foreach ($line in Get-Content -LiteralPath $SshConfig) {
-    if ($line -match '^\s*[Hh]ost\s+(.+)$') {
+    $text = $line -replace '\r$', ''      # configs saved on Windows are CRLF
+
+    if ($text -match '^\s*[Hh]ost\s+(.+)$') {
+      & $emit $hostName $instance $profileName
       $hostName = ''; $instance = ''; $profileName = ''
       foreach ($candidate in ($Matches[1] -split '\s+')) {
         if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
         if ($candidate -match '[*?]') { continue }          # skip wildcard blocks
+        $candidate = $candidate.Trim('"', "'")
         if ($HostPrefix -and -not $candidate.StartsWith($HostPrefix)) { continue }
         $hostName = $candidate
         break
@@ -101,20 +149,22 @@ function Get-SsmHosts {
     }
     if (-not $hostName) { continue }
 
-    if ($line -match '^\s*[Hh]ost[Nn]ame\s+(i-[0-9a-fA-F]+)') {
+    if ($text -match '^\s*[Hh]ost[Nn]ame\s+["'']?(i-[0-9a-fA-F]+)') {
       $instance = $Matches[1]
       continue
     }
-    if ($line -match 'AWS_PROFILE=([^;"\s]+)') {
-      $profileName = $Matches[1]
-      if ($instance -and $profileName) {
-        $rows.Add([pscustomobject]@{
-          HostName = $hostName; Instance = $instance; Profile = $profileName
-        })
-        $hostName = ''
+
+    # First profile mentioned in the block wins; a ProxyCommand naming it three
+    # times (sts / sso login / start-session) names the same one each time.
+    if (-not $profileName) {
+      if ($text -match 'AWS_PROFILE\s*=\s*["'']?([A-Za-z0-9._+@-]+)') {
+        $profileName = $Matches[1]
+      } elseif ($text -match '--profile[\s=]+["'']?([A-Za-z0-9._+@-]+)') {
+        $profileName = $Matches[1]
       }
     }
   }
+  & $emit $hostName $instance $profileName
   return $rows
 }
 
