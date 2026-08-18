@@ -16,8 +16,9 @@
       HostName "i-0123456789abcdef0"
       ProxyCommand powershell.exe "aws --profile my-profile ssm start-session ..."
 
-  Behavioural twin of ssm-instances.sh, including its exit codes. Requires
-  PowerShell 5.1+ (Windows PowerShell) or PowerShell 7+ (any platform).
+  Behavioural twin of ssm-instances.sh, including its exit codes, but slower:
+  state is fetched per host here, where the bash version batches it per profile.
+  Requires PowerShell 5.1+ (Windows PowerShell) or PowerShell 7+ (any platform).
 
 .PARAMETER Action
   toggle (default), start, stop, list, or hosts.

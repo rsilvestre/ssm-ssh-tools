@@ -9,11 +9,10 @@ nothing extra installed; WSL2 is the closest to the macOS/Linux experience.
 | [WSL2](#wsl2) | WSL2 + a distro | `ssm-instances.sh` |
 | [Git Bash](#git-bash) | Git for Windows | `ssm-instances.sh` |
 
-> **Status: partly verified.** The parser handles the Windows config dialects
-> documented below — quoted `HostName`, `--profile`, CRLF line endings — each
-> covered by a fixture, though those run on Linux rather than under Git Bash. The
-> PowerShell port is still unrun on Windows; it mirrors the bash version rather
-> than having been exercised. Please report anything that misbehaves.
+> **Status: both scripts run on Windows.** `ssm-instances.sh` has been used under
+> Git Bash and `ssm-instances.ps1` in PowerShell, against real ssh configs and a
+> real account. The PowerShell port is the slower of the two — see
+> [below](#the-powershell-port-is-slower). Please report anything that misbehaves.
 
 ## Prerequisites (all routes)
 
@@ -246,13 +245,27 @@ A convenience function for your profile (`notepad $PROFILE`):
 function inst { & "$HOME\git\ssm-ssh-tools\ssm-instances.ps1" @args }
 ```
 
-Differences from the bash version, all cosmetic:
+Differences from the bash version:
 
-- Parallel lookups use `Start-Job`, which spins up child runspaces. That has a
-  higher fixed startup cost than bash subshells, so `list` may not be as fast a
-  win over serial as the ~5x seen on macOS.
+- **It is slower** — see below. This is the one difference you will notice.
 - Interactivity is detected with `[Environment]::UserInteractive` rather than a
   tty check.
+
+### The PowerShell port is slower
+
+Same output, more waiting. Two reasons compound:
+
+- **Lookups are per host, not per profile.** The bash script batches instance ids
+  into one `describe-instances` and one `describe-instance-information` call per
+  profile, and starts a profile's calls together. The port still makes two calls
+  per host, sequentially — so it pays `1 + 2N` aws start-ups where the bash script
+  pays `3P`. On eight hosts sharing a profile that is 17 invocations against 3.
+- **`Start-Job` spins up child runspaces**, which cost meaningfully more than the
+  bash subshells the other script forks.
+
+Neither is inherent to PowerShell; the batching simply has not been ported. If the
+wait bothers you, `SSM_HOST_PREFIX` narrows the table, and `ssm-instances.sh` under
+[Git Bash](#git-bash) or [WSL2](#wsl2) has the faster implementation today.
 
 ## WSL2
 
