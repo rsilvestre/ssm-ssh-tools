@@ -11,6 +11,50 @@ Two independent parts. Take either one:
 2. **[`ssm-instances.sh`](#ssm-instancessh)** — start/stop the instances behind those
    ssh hosts, reading everything from `~/.ssh/config`.
 
+macOS and Linux use the bash script below. **On Windows, see
+[WINDOWS.md](WINDOWS.md)** — there is a PowerShell port (`ssm-instances.ps1`), plus
+notes on WSL2, Git Bash, and the Windows ProxyCommand form, which differs because
+`sh -c` is not available and the macOS PATH problem does not apply.
+
+## Install
+
+Part 1 needs no install — the ProxyCommand is a block of `~/.ssh/config`. Both
+parts need the [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+and the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+on `PATH`; check with `aws --version` and `session-manager-plugin --version`.
+
+### macOS and Linux
+
+```sh
+git clone https://github.com/rsilvestre/ssm-ssh-tools.git
+cd ssm-ssh-tools
+chmod +x ssm-instances.sh
+./ssm-instances.sh list
+```
+
+Also needs bash. `fzf` is optional — with it the picker gains arrow-key
+navigation, without it you get a numbered menu. Optionally alias it, in `~/.zshrc`
+or `~/.bashrc`:
+
+```sh
+alias inst=/path/to/ssm-ssh-tools/ssm-instances.sh
+```
+
+### Windows
+
+Three routes, covered in [WINDOWS.md](WINDOWS.md). Nothing extra to install for
+the first one:
+
+| Route | Needs | Script |
+|---|---|---|
+| [PowerShell](WINDOWS.md#powershell-native) | nothing extra | `ssm-instances.ps1` |
+| [WSL2](WINDOWS.md#wsl2) | WSL2 + a distro | `ssm-instances.sh` |
+| [Git Bash](WINDOWS.md#git-bash) | Git for Windows | `ssm-instances.sh` |
+
+If your organisation does not let you write to `Program Files`, start at
+[installing without admin rights](WINDOWS.md#without-admin-rights) — the AWS CLI
+has supported per-user routes, the Session Manager plugin does not.
+
 ## The ProxyCommand
 
 Put this in `~/.ssh/config`, replacing `<profile>`, `<region>`, and the instance id:
@@ -136,10 +180,43 @@ myproject-staging                  i-0fedcba987654321f   stopped      -
 
 Host, instance id, and AWS profile all come from `~/.ssh/config` — there is no
 second inventory to maintain. A block is treated as an SSM host when it has both an
-`i-*` HostName and an `AWS_PROFILE=` in its ProxyCommand; everything else is ignored.
+`i-*` HostName and a profile named somewhere in the block; everything else is
+ignored. Both fields are written differently across platforms, so all of these are
+recognised:
 
-State lookups run concurrently, and each AWS profile is checked once rather than
-once per host — on an 8-host config that is the difference between ~20s and ~4s.
+| Field | Forms accepted |
+|---|---|
+| instance | `HostName i-0123…`, `HostName "i-0123…"` |
+| profile | `export AWS_PROFILE=p`, `SetEnv AWS_PROFILE=p`, `$env:AWS_PROFILE='p'`, `--profile p`, `--profile=p` |
+
+`./ssm-instances.sh hosts` prints exactly what it matched, which is the quickest
+way to check a block it is ignoring.
+
+State lookups are batched per AWS profile rather than per host. Both
+`describe-instances` and `describe-instance-information` accept a list of instance
+ids, so eight hosts sharing one profile cost 3 API calls instead of 17. Profiles
+are fetched concurrently, and within a profile the credential check and the two
+lookups all start together — what dominates here is `aws` CLI start-up, not the
+API, so overlapping them is worth more than it looks. On a config where every host
+has its own profile there is nothing to batch, but that overlap still cuts three
+sequential start-ups down to one.
+
+This matters most under Git Bash on Windows, where each `aws` invocation costs a
+second or more rather than a few hundred milliseconds — see [WINDOWS.md](WINDOWS.md).
+Against a stub charging 0.4s per `aws` start-up, `list` roughly halves either way:
+
+| config | before | after | aws invocations |
+|---|---|---|---|
+| 3 hosts, 3 profiles | 2.06s | 1.27s | 11 → 11 |
+| 8 hosts, 1 profile | 2.08s | 1.25s | 19 → 5 |
+
+Those are synthetic — real times depend on your CLI's start-up cost and how many
+hosts share a profile — but the shape holds: the first row gains nothing from
+batching and everything from the overlap.
+
+One unknown instance id fails an entire batched `describe-instances` call, so a
+profile whose batch fails falls back to per-host calls. A stale `HostName` costs
+that profile some speed instead of blanking out every row it owns.
 
 `start` on an instance that is already running and Online returns straight away
 instead of repeating the boot wait. Otherwise it waits for the instance to run,
@@ -158,22 +235,6 @@ profile they need — the same fallback the ProxyCommand uses. It only does this
 a terminal attached, so it can never hang in a script waiting on a browser. `list`
 never triggers a login; it shows `no-creds` for those rows.
 
-### Install
-
-```sh
-git clone https://github.com/rsilvestre/ssm-ssh-tools.git
-cd ssm-ssh-tools && chmod +x ssm-instances.sh
-```
-
-Optionally, in `~/.zshrc` or `~/.bashrc`:
-
-```sh
-alias inst=/path/to/ssm-ssh-tools/ssm-instances.sh
-```
-
-Needs bash, the AWS CLI v2, and the Session Manager plugin. `fzf` is optional —
-without it you get a numbered menu.
-
 ### Configuration
 
 | Variable | Default | Purpose |
@@ -181,6 +242,7 @@ without it you get a numbered menu.
 | `SSM_REGION` | `aws configure get region`, else `us-east-1` | AWS region |
 | `SSM_HOST_PREFIX` | *(unset — matches all SSM hosts)* | only consider hosts starting with this |
 | `SSM_SSH_CONFIG` | `~/.ssh/config` | path to the ssh config |
+| `SSM_AWS_BIN` | *(whatever `aws` is on `PATH`)* | the `aws` binary, for hand-installed CLIs that never landed on `PATH` |
 
 ```sh
 SSM_HOST_PREFIX=myproject- ./ssm-instances.sh list
