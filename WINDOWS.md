@@ -260,8 +260,17 @@ The bash script runs unmodified inside WSL2, which is the best option if you
 already use it.
 
 ```bash
-sudo apt install -y awscli fzf     # or install AWS CLI v2 per AWS docs
+sudo apt install -y fzf                     # optional: arrow-key picker
+git clone https://github.com/rsilvestre/ssm-ssh-tools.git
+cd ssm-ssh-tools && chmod +x ssm-instances.sh
 ./ssm-instances.sh list
+```
+
+Install the AWS CLI v2 per AWS's Linux instructions rather than from `apt`, which
+carries v1. Optionally alias it in `~/.bashrc`:
+
+```bash
+alias inst=~/ssm-ssh-tools/ssm-instances.sh
 ```
 
 Two things to know:
@@ -282,8 +291,21 @@ Windows — the Linux binaries are what the WSL script invokes.
 
 ## Git Bash
 
-The bash script also runs under Git Bash, with two caveats worth knowing before
-you rely on it:
+```bash
+git clone https://github.com/rsilvestre/ssm-ssh-tools.git
+cd ssm-ssh-tools
+./ssm-instances.sh list
+```
+
+`chmod +x` is not needed — the executable bit is already set in the repo, and
+Windows filesystems do not carry it anyway. Optionally alias it in `~/.bashrc`,
+which Git Bash reads from `C:\Users\<you>\.bashrc`:
+
+```bash
+alias inst=~/git/ssm-ssh-tools/ssm-instances.sh
+```
+
+Two caveats worth knowing before you rely on this route:
 
 - Process creation on Windows is slow, and the AWS CLI v2 is a frozen Python app
   that costs a second or more per start where macOS pays a few hundred

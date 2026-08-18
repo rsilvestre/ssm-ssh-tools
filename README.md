@@ -16,6 +16,45 @@ macOS and Linux use the bash script below. **On Windows, see
 notes on WSL2, Git Bash, and the Windows ProxyCommand form, which differs because
 `sh -c` is not available and the macOS PATH problem does not apply.
 
+## Install
+
+Part 1 needs no install — the ProxyCommand is a block of `~/.ssh/config`. Both
+parts need the [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+and the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+on `PATH`; check with `aws --version` and `session-manager-plugin --version`.
+
+### macOS and Linux
+
+```sh
+git clone https://github.com/rsilvestre/ssm-ssh-tools.git
+cd ssm-ssh-tools
+chmod +x ssm-instances.sh
+./ssm-instances.sh list
+```
+
+Also needs bash. `fzf` is optional — with it the picker gains arrow-key
+navigation, without it you get a numbered menu. Optionally alias it, in `~/.zshrc`
+or `~/.bashrc`:
+
+```sh
+alias inst=/path/to/ssm-ssh-tools/ssm-instances.sh
+```
+
+### Windows
+
+Three routes, covered in [WINDOWS.md](WINDOWS.md). Nothing extra to install for
+the first one:
+
+| Route | Needs | Script |
+|---|---|---|
+| [PowerShell](WINDOWS.md#powershell-native) | nothing extra | `ssm-instances.ps1` |
+| [WSL2](WINDOWS.md#wsl2) | WSL2 + a distro | `ssm-instances.sh` |
+| [Git Bash](WINDOWS.md#git-bash) | Git for Windows | `ssm-instances.sh` |
+
+If your organisation does not let you write to `Program Files`, start at
+[installing without admin rights](WINDOWS.md#without-admin-rights) — the AWS CLI
+has supported per-user routes, the Session Manager plugin does not.
+
 ## The ProxyCommand
 
 Put this in `~/.ssh/config`, replacing `<profile>`, `<region>`, and the instance id:
@@ -195,22 +234,6 @@ If credentials have expired, `start` and `stop` run `aws sso login` for the one
 profile they need — the same fallback the ProxyCommand uses. It only does this with
 a terminal attached, so it can never hang in a script waiting on a browser. `list`
 never triggers a login; it shows `no-creds` for those rows.
-
-### Install
-
-```sh
-git clone https://github.com/rsilvestre/ssm-ssh-tools.git
-cd ssm-ssh-tools && chmod +x ssm-instances.sh
-```
-
-Optionally, in `~/.zshrc` or `~/.bashrc`:
-
-```sh
-alias inst=/path/to/ssm-ssh-tools/ssm-instances.sh
-```
-
-Needs bash, the AWS CLI v2, and the Session Manager plugin. `fzf` is optional —
-without it you get a numbered menu.
 
 ### Configuration
 
