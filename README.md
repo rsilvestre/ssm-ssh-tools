@@ -164,6 +164,16 @@ sequential start-ups down to one.
 
 This matters most under Git Bash on Windows, where each `aws` invocation costs a
 second or more rather than a few hundred milliseconds — see [WINDOWS.md](WINDOWS.md).
+Against a stub charging 0.4s per `aws` start-up, `list` roughly halves either way:
+
+| config | before | after | aws invocations |
+|---|---|---|---|
+| 3 hosts, 3 profiles | 2.06s | 1.27s | 11 → 11 |
+| 8 hosts, 1 profile | 2.08s | 1.25s | 19 → 5 |
+
+Those are synthetic — real times depend on your CLI's start-up cost and how many
+hosts share a profile — but the shape holds: the first row gains nothing from
+batching and everything from the overlap.
 
 One unknown instance id fails an entire batched `describe-instances` call, so a
 profile whose batch fails falls back to per-host calls. A stale `HostName` costs
