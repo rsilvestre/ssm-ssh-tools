@@ -107,6 +107,45 @@ aws ssm describe-instance-information \
 
 `Online` means the agent has registered and you can move on to the SSH config.
 
+### Metadata has to be reachable, and v2 is fine
+
+The role is only half of it. The agent gets its credentials from the **instance metadata service** (IMDS), the link-local endpoint at `169.254.169.254`. If metadata is switched off, the role may be perfectly configured and the agent still has no way to obtain credentials from it — producing, once again, an instance that never registers and never says why.
+
+Check it:
+
+```sh
+aws ec2 describe-instances --instance-ids i-0123456789abcdef0 \
+  --query 'Reservations[0].Instances[0].MetadataOptions.[HttpEndpoint,HttpTokens,HttpPutResponseHopLimit]' \
+  --output text
+```
+
+Expect something like:
+
+```
+enabled    required    2
+```
+
+Reading those three, in order:
+
+- **`HttpEndpoint`** — `enabled` or `disabled`. If it is `disabled`, nothing on the instance can read metadata and the agent cannot authenticate. This is the one that actually breaks things.
+- **`HttpTokens`** — `required` means IMDSv2 only; `optional` allows the older v1. **`required` is correct and is what you want.**
+- **`HttpPutResponseHopLimit`** — how many network hops a metadata response may traverse. `1` is fine for a process on the instance; containers need `2`.
+
+To enforce IMDSv2 while keeping metadata reachable:
+
+```sh
+aws ec2 modify-instance-metadata-options --instance-id i-0123456789abcdef0 \
+  --http-endpoint enabled --http-tokens required --http-put-response-hop-limit 2
+```
+
+This takes effect immediately — no restart, unlike attaching a role.
+
+**IMDSv2 does not break the SSM agent.** Worth stating plainly, because the two get conflated: hardening guides tell you to set `--http-tokens required`, and when instances then fail to register it is tempting to blame that change. Any current agent speaks v2 natively. Setting `required` is the recommended posture and a straightforward security win — it closes the SSRF path that made v1 a liability, where a request-forging bug in an application could be tricked into fetching your role credentials. Requiring the `PUT`-issued token to make that class of attack much harder is exactly the point.
+
+What *does* break the agent is `--http-endpoint disabled`. If you are hardening instances, disable v1 by requiring tokens — do not disable metadata itself.
+
+One caveat for containerised workloads: a container is one hop further from the metadata service than a process on the host, so a hop limit of `1` will make container credential lookups fail while host-level ones succeed. If the agent registers but something in a container cannot get credentials, raise the limit to `2`.
+
 ### Two subtler variants
 
 **A role that exists but lacks the policy** behaves identically to no role at all — the agent registers with nothing and stays invisible. Check the attached policies, not just that a profile is present.
@@ -247,7 +286,7 @@ You still see the prompt; it just no longer corrupts the tunnel. This applies to
 | `export: not a valid identifier` | missing `sh -c` — gotcha 2 |
 | `Connection closed by UNKNOWN port 65535` | stdout pollution (gotcha 4), or the target is not connected |
 | `TargetNotConnected` | instance stopped, agent down, or still booting |
-| *empty* `describe-instance-information` | instance role missing or lacking `AmazonSSMManagedInstanceCore`, or no route to the SSM endpoints |
+| *empty* `describe-instance-information` | instance role missing or lacking `AmazonSSMManagedInstanceCore`, metadata endpoint disabled, or no route to the SSM endpoints |
 | `Host key verification failed` | first connect to a new instance ID — see below |
 | `Token has expired and refresh failed` | run `aws sso login --profile <profile>` |
 
