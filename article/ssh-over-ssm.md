@@ -16,7 +16,7 @@ This walks through a working setup, then explains each piece of the incantation 
 
 - **AWS CLI v2** — [install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
 - **Session Manager plugin** — [install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html). A separate download from the CLI, and the single most common cause of failure here.
-- **An instance running the SSM agent**, with an instance profile including `AmazonSSMManagedInstanceCore`. Amazon Linux 2/2023 and recent Ubuntu images ship the agent preinstalled.
+- **An instance running the SSM agent**, with an instance profile granting it SSM access — see [the instance role](#the-instance-role-is-the-usual-culprit) below, which is where most setups fail. Amazon Linux 2/2023 and recent Ubuntu images ship the agent preinstalled.
 - **IAM permissions** for `ssm:StartSession` on the instance and the `AWS-StartSSHSession` document.
 
 Check the instance is actually registered before touching any config:
@@ -27,7 +27,91 @@ aws ssm describe-instance-information \
   --query 'InstanceInformationList[0].PingStatus' --output text
 ```
 
-You want `Online`. If you get nothing back, the instance is stopped, the agent is not running, or the instance role is missing — fix that first, because no amount of SSH config will help.
+You want `Online`. **Empty output is the normal failure**, and it is not very forthcoming: the command succeeds and returns nothing at all, because SSM simply has no record of that instance. It means the instance is stopped, the agent is not running, or — most often — the instance role is missing.
+
+Fix that before touching any SSH config. Nothing in the rest of this article can compensate for an instance SSM cannot see.
+
+## The instance role is the usual culprit
+
+The agent has to authenticate itself *to* SSM, and it does that with the IAM role attached to the instance. No role, or a role without SSM permissions, and the agent starts, runs, tries to register, and fails — silently, from the outside. The instance looks healthy. It simply never appears in `describe-instance-information`.
+
+Check what the instance actually has:
+
+```sh
+aws ec2 describe-instances --instance-ids i-0123456789abcdef0 \
+  --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn' --output text
+```
+
+`None` means no profile is attached, and that is your problem.
+
+If a profile *is* attached, check the role behind it has the right policy:
+
+```sh
+aws iam list-attached-role-policies --role-name my-instance-role \
+  --query 'AttachedPolicies[].PolicyName' --output text
+```
+
+You are looking for **`AmazonSSMManagedInstanceCore`** — the AWS-managed policy granting exactly the permissions the agent needs to register and accept sessions. It is the supported baseline; use it rather than hand-rolling a policy, unless you have a specific reason not to.
+
+### Attaching one
+
+If there is no role yet, create one that EC2 can assume and give it that policy:
+
+```sh
+cat > trust.json <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Service": "ec2.amazonaws.com"},
+    "Action": "sts:AssumeRole"
+  }]
+}
+JSON
+
+aws iam create-role --role-name my-instance-role \
+  --assume-role-policy-document file://trust.json
+
+aws iam attach-role-policy --role-name my-instance-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+aws iam create-instance-profile --instance-profile-name my-instance-role
+aws iam add-role-to-instance-profile --instance-profile-name my-instance-role \
+  --role-name my-instance-role
+
+aws ec2 associate-iam-instance-profile --instance-id i-0123456789abcdef0 \
+  --iam-instance-profile Name=my-instance-role
+```
+
+The instance-profile step catches people out: EC2 attaches an *instance profile*, not a role directly. In the console they are created together and the distinction is invisible, so it only surfaces when you do this from the CLI.
+
+### The part that makes it look broken
+
+**Attaching a role to a running instance does not take effect immediately.** The agent picks up credentials at startup, so it carries on failing with the old ones. Nothing you attached appears to work.
+
+Restart the agent, or reboot:
+
+```sh
+sudo systemctl restart amazon-ssm-agent
+```
+
+Which is a chicken-and-egg problem — you cannot SSM in to fix the thing preventing SSM. Use EC2 Instance Connect, an existing SSH route, or just reboot the instance from the console or CLI.
+
+Then re-check, allowing a minute for registration:
+
+```sh
+aws ssm describe-instance-information \
+  --filters "Key=InstanceIds,Values=i-0123456789abcdef0" \
+  --query 'InstanceInformationList[0].PingStatus' --output text
+```
+
+`Online` means the agent has registered and you can move on to the SSH config.
+
+### Two subtler variants
+
+**A role that exists but lacks the policy** behaves identically to no role at all — the agent registers with nothing and stays invisible. Check the attached policies, not just that a profile is present.
+
+**A private subnet with no route to the SSM endpoints** also produces a silent non-registration. The agent needs to reach `ssm`, `ssmmessages`, and `ec2messages`; that means either a NAT gateway or VPC interface endpoints for those three services. If the role is provably correct and the instance still never appears, this is the next thing to check — and it is easy to miss, because "private subnet with no outbound route" is a perfectly reasonable configuration for everything else.
 
 ## The config
 
@@ -163,6 +247,7 @@ You still see the prompt; it just no longer corrupts the tunnel. This applies to
 | `export: not a valid identifier` | missing `sh -c` — gotcha 2 |
 | `Connection closed by UNKNOWN port 65535` | stdout pollution (gotcha 4), or the target is not connected |
 | `TargetNotConnected` | instance stopped, agent down, or still booting |
+| *empty* `describe-instance-information` | instance role missing or lacking `AmazonSSMManagedInstanceCore`, or no route to the SSM endpoints |
 | `Host key verification failed` | first connect to a new instance ID — see below |
 | `Token has expired and refresh failed` | run `aws sso login --profile <profile>` |
 
