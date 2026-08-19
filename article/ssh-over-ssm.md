@@ -323,18 +323,118 @@ And when SSH works in a Windows terminal but fails in VS Code, it is usually *no
 
 ## Starting the instances
 
-A side effect of moving off bastions: dev boxes get stopped to save money, and starting one means finding its instance ID in the console, starting it, then waiting an unknown amount of time before SSH works.
+A side effect of moving off bastions: dev boxes get stopped to save money. Starting one means finding its instance ID, starting it, then waiting an unknown amount of time before SSH actually works — and that last part is the annoying bit, because there is no obvious signal for when it is ready.
 
-I wrote a small tool for this — [ssm-ssh-tools](https://github.com/rsilvestre/ssm-ssh-tools). It reads host, instance ID, and profile out of `~/.ssh/config`, so there is no second inventory to maintain:
+I wrote a small tool for this: **[ssm-ssh-tools](https://github.com/rsilvestre/ssm-ssh-tools)**. Two scripts — `ssm-instances.sh` for bash, `ssm-instances.ps1` for PowerShell — doing the same job.
+
+### Your ssh config is the inventory
+
+The design decision everything else follows from: **there is no config file**. The tool reads `~/.ssh/config` and treats a block as an SSM host when it has both an `i-*` HostName and a profile in its ProxyCommand.
+
+That means the list is always current. Add a host, change an instance ID after a rebuild, delete a box — the tool follows automatically, because it is reading the same file SSH reads. There is no second inventory to forget to update, and nothing to keep in sync.
 
 ```
-$ ./ssm-instances.sh list
+$ ssm-instances.sh list
 HOST                               INSTANCE              EC2          SSM
 myproject-dev                      i-0123456789abcdef0   running      Online
 myproject-staging                  i-0fedcba987654321f   stopped      -
+myproject-ci                       i-0abc123def4567890   running      Online
 ```
 
-Run it bare and it shows the table, lets you pick a host, and flips its state — starting a stopped one, or stopping a running one after a confirmation. It waits for SSM registration and retries the SSH check, because of the `Online`-is-not-connectable lag above. There is a bash version and a PowerShell port.
+Two state columns, not one, and the distinction matters: **`running` is EC2, `Online` is SSM**. An instance can be `running` while SSM shows `-`, which is precisely the situation the role and metadata sections above describe — the box is up, the agent is not talking to SSM, and SSH will fail. Seeing both side by side tells you *which* problem you have.
+
+### One command, driven by state
+
+Run it with no arguments and it shows the table, then asks which host you want:
+
+```
+$ ssm-instances.sh
+Loading instance states...
+HOST                               INSTANCE              EC2          SSM
+myproject-dev                      i-0123456789abcdef0   running      Online
+myproject-staging                  i-0fedcba987654321f   stopped      -
+
+ 1) myproject-dev
+ 2) myproject-staging
+toggle which number (Enter to quit)? 2
+```
+
+Picking a **stopped** host starts it. Picking a **running** one stops it, after a `[y/N]` confirmation — stopping disconnects anyone working on that box, so it should never happen on a mis-keyed number. There is no separate command to remember for each direction; the state you can see in the table determines what happens.
+
+If you would rather be explicit, `start` and `stop` stay single-direction and never surprise you:
+
+```sh
+ssm-instances.sh start myproject-dev   # never stops anything
+ssm-instances.sh stop  myproject-dev
+ssm-instances.sh start                 # picker, start-only
+```
+
+That split matters for scripting: a bare run is convenient interactively, while `start <host>` is predictable enough to put in a Makefile.
+
+### It waits for *connectable*, not merely *started*
+
+This is the part that saves the most time, and it is the direct application of the `Online`-is-not-connectable lag from earlier.
+
+Starting an instance yourself means watching the console, guessing when the agent is up, trying SSH, getting `TargetNotConnected`, waiting, trying again. The tool does that loop for you:
+
+1. Issues the start and waits for EC2 to report `running`.
+2. Polls SSM until the agent registers — up to three minutes, because a cold boot genuinely takes that long.
+3. **Then actually attempts SSH**, retrying up to five times at fifteen-second intervals, because `Online` arrives slightly before the agent will accept sessions.
+
+```
+$ ssm-instances.sh start myproject-staging
+myproject-staging -> i-0fedcba987654321f (my-profile), state: stopped
+Starting; waiting for running state...
+Running.
+Waiting for SSM agent to register (up to 3 min)...
+SSM: Online
+Verifying ssh...
+  not ready yet, retrying...
+CONNECTED: ssh myproject-staging  (ip-10-0-4-112.eu-west-1.compute.internal)
+```
+
+Note the `not ready yet, retrying...` line — that is the lag happening in real time. A naive script that trusted `Online` would have reported failure at exactly that moment.
+
+The last line is the useful one: it does not claim success until a real SSH session has returned a real hostname. If it cannot connect, it says so rather than leaving you to discover it yourself.
+
+Starting something already up returns immediately instead of re-running the whole wait:
+
+```
+$ ssm-instances.sh start myproject-dev
+Already running and Online. Connect with: ssh myproject-dev
+```
+
+### The picker keeps going
+
+After an action it pauses so you can read the result, then re-fetches the table — showing the new state — and asks again. Starting three boxes in the morning is one command, not three. Enter on an empty selection, or `q`, leaves.
+
+### It refreshes your credentials
+
+The same fallback as the ProxyCommand: if a profile's token has expired, `start` and `stop` run `aws sso login` for the one profile they need, then verify credentials actually work before continuing.
+
+With one guard — it only does this when a terminal is attached. Called from a script or a pipe, it exits with a clear message instead of blocking forever on a browser prompt that nobody can answer. `list` never triggers a login at all; it shows `no-creds` for those rows and moves on, so one stale token cannot hold up the whole table.
+
+### Speed, because it is a lookup you run constantly
+
+The first version made three sequential AWS calls per host. On an eight-host config that is 24 round-trips at roughly 0.7s each — **over 20 seconds** to draw a table. Slow enough that you stop running it.
+
+Two changes fixed it: check each *profile* once rather than once per host, and batch the per-host lookups by profile since both APIs accept many instance IDs at a time. Against my own config — eight hosts spread across five AWS accounts — that is now:
+
+```
+$ time ssm-instances.sh list
+...
+real    0m2.73s
+```
+
+Fast enough to run without thinking about it, which is the difference between a tool you use and one you avoid.
+
+### Other things worth knowing
+
+- **`SSM_HOST_PREFIX`** narrows the tool to one project's hosts if your ssh config has many. `SSM_REGION`, `SSM_SSH_CONFIG`, and `SSM_AWS_BIN` cover the other environment differences — the last one for corporate machines where the AWS CLI lives somewhere unusual because policy forbids writing to `Program Files`.
+- **`hosts`** emits tab-separated `host / instance / profile` for scripting against.
+- **Exit codes are specific** — `3` credentials, `4` instance does not exist, `7` started but SSM never registered — so a wrapper script can tell "your token expired" apart from "that instance is gone".
+- **Host keys use `accept-new`**, so a rebuilt instance with a new ID does not fail verification under `BatchMode`, while a *changed* key on a known host still errors as it should.
+- **Multi-account works** because the profile comes from each host's own ProxyCommand. The table above spans five AWS accounts; nothing about that is special-cased.
 
 ### What porting it to Windows revealed
 
