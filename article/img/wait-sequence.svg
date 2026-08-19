@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="640" viewBox="0 0 1400 640" font-family="Menlo, DejaVu Sans Mono, monospace">
+  <rect width="1400" height="640" fill="#faf8f5"/>
+
+  <text x="70" y="66" font-size="26" font-family="Georgia, serif" fill="#1c1a17">Started is not the same as connectable</text>
+  <line x1="70" y1="96" x2="1330" y2="96" stroke="#e0dbd2" stroke-width="2"/>
+
+  <!-- timeline -->
+  <line x1="130" y1="230" x2="1270" y2="230" stroke="#d8d2c8" stroke-width="3"/>
+
+  <!-- stage 1 -->
+  <circle cx="130" cy="230" r="11" fill="#57514a"/>
+  <text x="130" y="196" font-size="17" fill="#1c1a17" text-anchor="middle">start</text>
+  <text x="130" y="272" font-size="14" fill="#8a8177" text-anchor="middle">0s</text>
+
+  <!-- stage 2 -->
+  <circle cx="510" cy="230" r="11" fill="#57514a"/>
+  <text x="510" y="196" font-size="17" fill="#1c1a17" text-anchor="middle">running</text>
+  <text x="510" y="272" font-size="14" fill="#8a8177" text-anchor="middle">~30s</text>
+  <text x="510" y="304" font-size="14" fill="#8c2f2f" text-anchor="middle">ssh here fails</text>
+
+  <!-- stage 3 -->
+  <circle cx="890" cy="230" r="11" fill="#b0541f"/>
+  <text x="890" y="196" font-size="17" fill="#b0541f" text-anchor="middle">SSM: Online</text>
+  <text x="890" y="272" font-size="14" fill="#8a8177" text-anchor="middle">~90s</text>
+  <text x="890" y="304" font-size="14" fill="#8c2f2f" text-anchor="middle">ssh STILL fails</text>
+
+  <!-- stage 4 -->
+  <circle cx="1270" cy="230" r="11" fill="#1f7a4d"/>
+  <text x="1270" y="196" font-size="17" fill="#1f7a4d" text-anchor="middle">connectable</text>
+  <text x="1270" y="272" font-size="14" fill="#8a8177" text-anchor="middle">~2min</text>
+  <text x="1270" y="304" font-size="14" fill="#1f7a4d" text-anchor="middle">ssh works</text>
+
+  <!-- the gap -->
+  <rect x="890" y="150" width="380" height="24" rx="12" fill="#f7ecec" stroke="#8c2f2f" stroke-width="1.5"/>
+  <text x="1080" y="167" font-size="14" fill="#8c2f2f" text-anchor="middle">the gap nobody tells you about</text>
+
+  <!-- explanation -->
+  <rect x="70" y="376" width="1260" height="96" rx="6" fill="#faf8f5" stroke="#b0541f" stroke-width="2"/>
+  <text x="96" y="412" font-size="17" fill="#b0541f">The SSM agent registers with the control plane before it will accept sessions.</text>
+  <text x="96" y="444" font-size="16" fill="#57514a">So the API says Online while your connection still returns TargetNotConnected.</text>
+
+  <text x="70" y="522" font-size="15" fill="#8a8177">A script that trusts the first Online reports failure. This one retries:</text>
+  <rect x="70" y="540" width="1260" height="64" rx="4" fill="#f2eee8" stroke="#e0dbd2" stroke-width="1.5"/>
+  <text x="90" y="568" font-size="15" fill="#2d2822">Verifying ssh...</text>
+  <text x="90" y="592" font-size="15" fill="#1f7a4d">  not ready yet, retrying...   →   CONNECTED</text>
+</svg>

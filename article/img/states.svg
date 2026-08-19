@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="620" viewBox="0 0 1400 620" font-family="Menlo, DejaVu Sans Mono, monospace">
+  <rect width="1400" height="620" fill="#faf8f5"/>
+
+  <text x="70" y="66" font-size="26" font-family="Georgia, serif" fill="#1c1a17">Two columns, because there are two ways to be down</text>
+  <line x1="70" y1="96" x2="1330" y2="96" stroke="#e0dbd2" stroke-width="2"/>
+
+  <text x="70" y="146" font-size="15" fill="#8a8177" letter-spacing="2">EC2</text>
+  <text x="330" y="146" font-size="15" fill="#8a8177" letter-spacing="2">SSM</text>
+  <text x="600" y="146" font-size="15" fill="#8a8177" letter-spacing="2">WHAT IT MEANS</text>
+
+  <!-- row 1 -->
+  <rect x="70" y="172" width="1260" height="112" rx="6" fill="#f2eee8" stroke="#e0dbd2" stroke-width="1.5"/>
+  <text x="96" y="222" font-size="20" fill="#57514a">stopped</text>
+  <text x="356" y="222" font-size="20" fill="#8a8177">-</text>
+  <text x="626" y="216" font-size="18" fill="#1c1a17">The box is off.</text>
+  <text x="626" y="248" font-size="16" fill="#57514a">Start it. Nothing unusual.</text>
+
+  <!-- row 2 -->
+  <rect x="70" y="300" width="1260" height="112" rx="6" fill="#f1f5f2" stroke="#1f7a4d" stroke-width="2"/>
+  <text x="96" y="350" font-size="20" fill="#1f7a4d">running</text>
+  <text x="356" y="350" font-size="20" fill="#1f7a4d">Online</text>
+  <text x="626" y="344" font-size="18" fill="#1c1a17">Ready.</text>
+  <text x="626" y="376" font-size="16" fill="#57514a">ssh myproject-dev</text>
+
+  <!-- row 3 -->
+  <rect x="70" y="428" width="1260" height="126" rx="6" fill="#f7ecec" stroke="#8c2f2f" stroke-width="2"/>
+  <text x="96" y="478" font-size="20" fill="#8c2f2f">running</text>
+  <text x="356" y="478" font-size="20" fill="#8c2f2f">-</text>
+  <text x="626" y="472" font-size="18" fill="#8c2f2f">Up, billing, unreachable.</text>
+  <text x="626" y="504" font-size="16" fill="#57514a">The agent is not talking to SSM: check the instance</text>
+  <text x="626" y="530" font-size="16" fill="#57514a">role, metadata, or the route to the SSM endpoints.</text>
+</svg>

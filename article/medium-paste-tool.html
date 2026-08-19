@@ -1,0 +1,131 @@
+<!doctype html><meta charset="utf-8"><style>body{font-family:Georgia,serif;max-width:44em;margin:3em auto;padding:0 1.5em;line-height:1.6}pre{background:#f4f2ef;padding:1em;overflow-x:auto;border-radius:4px}code{font-family:ui-monospace,Menlo,monospace;font-size:.9em}pre code{font-size:.85em}</style>
+<h1>Start and stop your AWS dev instances from the terminal</h1>
+<p><em>A small tool that reads your ssh config, so there is no second inventory — and that waits until the box is actually reachable, not merely running.</em></p>
+<hr>
+<p>Dev instances get stopped to save money. That is the right call: an idle <code>m5.xlarge</code> is about $140 a month, and nobody needs it running at 3am.</p>
+<p>The cost lands somewhere else. Every morning you want that box back, and getting it back means: open the console, find the right instance among thirty, check you are in the right account, start it, then wait. And the waiting is the annoying part, because there is no clear signal for when it is ready. You try SSH too early, get an error, wait, try again.</p>
+<p>I got tired of that and wrote a tool. It reads the hosts you already have in <code>~/.ssh/config</code>, shows you what is running, lets you flip one, and does not claim success until it has opened a real SSH session and got a hostname back.</p>
+<pre><code>$ ssm-instances.sh list
+HOST                               INSTANCE              EC2          SSM
+myproject-dev                      i-0123456789abcdef0   running      Online
+myproject-staging                  i-0fedcba987654321f   stopped      -
+myproject-ci                       i-0abc123def4567890   running      Online</code></pre>
+<p>It is two scripts — <code>ssm-instances.sh</code> for bash, <code>ssm-instances.ps1</code> for PowerShell — at <strong><a href="https://github.com/rsilvestre/ssm-ssh-tools">github.com/rsilvestre/ssm-ssh-tools</a></strong>.</p>
+<h2>Your ssh config is already the inventory</h2>
+<p>The design decision everything else follows from: <strong>there is no config file</strong>.</p>
+<p>Every tool like this wants you to list your instances somewhere. That list then rots — someone rebuilds a box, the ID changes, and the tool is confidently wrong.</p>
+<p>You already maintain that list, though. It is your ssh config:</p>
+<pre><code>Host myproject-dev
+  HostName i-0123456789abcdef0
+  User ec2-user
+  ProxyCommand sh -c &quot;... export AWS_PROFILE=my-profile; ... aws ssm start-session ...&quot;</code></pre>
+<p>So the tool reads that, and treats a block as one of its own when it has both an <code>i-*</code> HostName and an AWS profile. Add a host, change an instance ID, delete a box — it follows automatically, because it is reading the same file SSH reads. Nothing to keep in sync.</p>
+<p>It also means multi-account works with no configuration at all. Each host carries its own profile, so a single table can span five AWS accounts. Mine does.</p>
+<h2>Two state columns, because there are two ways to be down</h2>
+<p>Look at that table again. <code>running</code> is EC2. <code>Online</code> is SSM. <strong>They are not the same thing, and the gap between them is where the time goes.</strong></p>
+<p>An instance can be <code>running</code> while SSM shows <code>-</code>. The box is up, you are paying for it, and you still cannot connect — because SSH here goes through Systems Manager, and SSM only knows about instances whose agent has checked in.</p>
+<p>Seeing both columns tells you <em>which</em> problem you have:</p>
+<ul>
+<li><code>stopped</code> / <code>-</code> — just start it.</li>
+<li><code>running</code> / <code>Online</code> — ready, go.</li>
+<li><code>running</code> / <code>-</code> — the box is up but the agent is not talking to SSM. That is a configuration problem, not a patience problem. <a href="#when-an-instance-never-comes-online">More on that below</a>.</li>
+</ul>
+<p>That third row is the one that used to cost me twenty minutes of confusion. Now it is visible at a glance.</p>
+<h2>One command, driven by state</h2>
+<p>Run it with no arguments and it shows the table, then asks:</p>
+<pre><code>$ ssm-instances.sh
+Loading instance states...
+HOST                               INSTANCE              EC2          SSM
+myproject-dev                      i-0123456789abcdef0   running      Online
+myproject-staging                  i-0fedcba987654321f   stopped      -
+
+ 1) myproject-dev
+ 2) myproject-staging
+toggle which number (Enter to quit)? 2</code></pre>
+<p>Pick a <strong>stopped</strong> host and it starts. Pick a <strong>running</strong> one and it stops, after a <code>[y/N]</code> confirmation — stopping disconnects whoever is working on that box, so it should never happen on a mis-keyed number.</p>
+<p>There is no separate command to remember per direction. The state you can already see decides.</p>
+<p>The picker also loops. After an action it pauses so you can read the result, then re-fetches the table with the new state and asks again — so starting three boxes in the morning is one command, not three. Enter or <code>q</code> leaves.</p>
+<p>If you would rather be explicit, <code>start</code> and <code>stop</code> are single-direction and never surprise you:</p>
+<pre><code>ssm-instances.sh start myproject-dev   # never stops anything
+ssm-instances.sh stop  myproject-dev
+ssm-instances.sh start                 # picker, start-only</code></pre>
+<p>That split matters for scripting. A bare run is convenient at a keyboard; <code>start &lt;host&gt;</code> is predictable enough to put in a Makefile.</p>
+<h2>It waits for connectable, not merely started</h2>
+<p>This is the part that actually saves the time.</p>
+<p>The naive version of this script issues <code>start-instances</code>, waits for <code>running</code>, and tells you it is done. Then your SSH fails, because <code>running</code> means the hypervisor has the VM — not that the SSM agent has booted, registered, and is willing to accept a session.</p>
+<p>So the tool does the whole loop:</p>
+<p>1. Starts the instance and waits for EC2 to report <code>running</code>. 2. Polls SSM until the agent registers — up to three minutes, because a cold boot genuinely takes that long. 3. <strong>Then actually tries SSH</strong>, retrying five times at fifteen-second intervals.</p>
+<p>That third step exists because of something worth knowing even if you never use this tool: <strong><code>Online</code> does not mean sessionable.</strong> The agent registers with the SSM control plane slightly before it will accept sessions. There is a window — usually under a minute — where the API says <code>Online</code> and your connection still fails with <code>TargetNotConnected</code>.</p>
+<p>You can watch it happen:</p>
+<pre><code>$ ssm-instances.sh start myproject-staging
+myproject-staging -&gt; i-0fedcba987654321f (my-profile), state: stopped
+Starting; waiting for running state...
+Running.
+Waiting for SSM agent to register (up to 3 min)...
+SSM: Online
+Verifying ssh...
+  not ready yet, retrying...
+CONNECTED: ssh myproject-staging  (ip-10-0-4-112.eu-west-1.compute.internal)</code></pre>
+<p>That <code>not ready yet, retrying...</code> line is the lag, live. A script that trusted <code>Online</code> would have reported failure right there.</p>
+<p>The last line is the point: it does not say &quot;done&quot;, it says it opened a session and the box answered with its hostname. If it cannot connect, it tells you, rather than leaving you to find out.</p>
+<p>And starting something already up returns immediately instead of repeating the whole wait:</p>
+<pre><code>$ ssm-instances.sh start myproject-dev
+Already running and Online. Connect with: ssh myproject-dev</code></pre>
+<h2>Fast enough to actually run</h2>
+<p>The first version made three sequential AWS calls per host. On an eight-host config that is 24 round-trips at roughly 0.7s each — <strong>over 20 seconds</strong> to draw a table. Slow enough that I stopped running it, which defeats the point.</p>
+<p>Two changes fixed it: check each <em>profile</em> once rather than once per host, and batch the per-host lookups by profile, since both APIs accept many instance IDs at a time.</p>
+<p>Against my own config — eight hosts across five AWS accounts — it now takes <strong>2.7 seconds</strong>. That is the difference between a tool you use and one you avoid.</p>
+<h2>Expired credentials do not stop you</h2>
+<p>If a profile&#x27;s SSO token has lapsed, <code>start</code> and <code>stop</code> run <code>aws sso login</code> for the one profile they need, then verify the credentials actually work before continuing.</p>
+<p>With one guard: only when a terminal is attached. Called from a script or a pipe, it exits with a clear message instead of blocking forever on a browser prompt nobody can answer.</p>
+<p><code>list</code> never triggers a login at all — it shows <code>no-creds</code> for those rows and moves on, so one stale token in one account cannot hold up the whole table.</p>
+<h2>When an instance never comes Online</h2>
+<p>The <code>running</code> / <code>-</code> row deserves its own section, because the failure is silent and the cause is almost always one of three things.</p>
+<p>First, the check itself:</p>
+<pre><code>aws ssm describe-instance-information \
+  --filters &quot;Key=InstanceIds,Values=i-0123456789abcdef0&quot; \
+  --query &#x27;InstanceInformationList[0].PingStatus&#x27; --output text</code></pre>
+<p><strong>Empty output is the normal failure.</strong> Not an error — the command succeeds and returns nothing, because SSM has no record of that instance at all.</p>
+<h3>1. The instance role</h3>
+<p>The agent authenticates to SSM using the IAM role attached to the instance. No role, or a role without SSM permissions, and it starts, tries to register, and fails silently.</p>
+<pre><code>aws ec2 describe-instances --instance-ids i-0123456789abcdef0 \
+  --query &#x27;Reservations[0].Instances[0].IamInstanceProfile.Arn&#x27; --output text</code></pre>
+<p><code>None</code> means no profile attached. If one is attached, check the role behind it carries <strong><code>AmazonSSMManagedInstanceCore</code></strong> — the AWS-managed policy with exactly the permissions the agent needs.</p>
+<p>The catch that wastes an hour: <strong>attaching a role to a running instance does not take effect immediately.</strong> The agent picks up credentials at startup, so it carries on failing with the old ones. Restart the agent or reboot — and note you cannot SSM in to do that, since SSM is the thing that is broken. Use EC2 Instance Connect, another SSH route, or reboot from the console.</p>
+<h3>2. Instance metadata</h3>
+<p>The agent reads those role credentials from the instance metadata service. If metadata is switched off, the role can be perfect and the agent still has no way to use it.</p>
+<pre><code>aws ec2 describe-instances --instance-ids i-0123456789abcdef0 \
+  --query &#x27;Reservations[0].Instances[0].MetadataOptions.[HttpEndpoint,HttpTokens]&#x27; \
+  --output text</code></pre>
+<p>You want <code>enabled</code> and <code>required</code>. To set it:</p>
+<pre><code>aws ec2 modify-instance-metadata-options --instance-id i-0123456789abcdef0 \
+  --http-endpoint enabled --http-tokens required --http-put-response-hop-limit 2</code></pre>
+<p><strong>IMDSv2 does not break the SSM agent</strong> — worth saying plainly, because these get conflated. Hardening guides tell you to set <code>--http-tokens required</code>, and when instances then fail to register it is tempting to blame that change. Any current agent speaks v2 natively, and <code>required</code> is the posture you want: it closes the SSRF path that made v1 a liability.</p>
+<p>What breaks the agent is <code>--http-endpoint disabled</code>. Harden by requiring tokens, not by disabling metadata.</p>
+<p>(Containers need a hop limit of <code>2</code>; <code>1</code> is fine for a process on the host.)</p>
+<h3>3. No route to the SSM endpoints</h3>
+<p>A private subnet with no outbound route also produces silent non-registration. The agent needs to reach <code>ssm</code>, <code>ssmmessages</code> and <code>ec2messages</code> — so either a NAT gateway or VPC interface endpoints for those three.</p>
+<p>This one is easy to miss, because &quot;private subnet with no outbound route&quot; is a perfectly reasonable configuration for everything else in your estate.</p>
+<h2>If you are not set up for SSM yet</h2>
+<p>The tool assumes you already SSH to these instances through Systems Manager. If you do not, the short version is one ssh config block per host:</p>
+<pre><code>Host myproject-dev
+  HostName i-0123456789abcdef0
+  User ec2-user
+  ProxyCommand sh -c &quot;export PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin; export AWS_PROFILE=my-profile; export AWS_REGION=eu-west-1; aws sts get-caller-identity &gt;/dev/null 2&gt;&amp;1 || aws sso login --profile my-profile &gt;&amp;2; exec aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters &#x27;portNumber=%p&#x27;&quot;</code></pre>
+<p>Then <code>ssh myproject-dev</code> reaches a box with no public IP, no open port 22, and no bastion. <code>HostName</code> is the instance ID — OpenSSH substitutes it into <code>%h</code>.</p>
+<p>That line is dense because each part fixes something specific. The one worth knowing about, since it costs people an afternoon: if it works in your terminal but fails in VS Code or Cursor with <code>SessionManagerPlugin is not found</code>, that is the <code>export PATH=</code> at the front. GUI apps on macOS do not inherit your shell&#x27;s PATH — launched from the Dock they get <code>/usr/bin:/bin:/usr/sbin:/sbin</code>, no Homebrew. And pointing at <code>aws</code> by absolute path does <em>not</em> fix it, because the CLI does its own separate PATH lookup for the plugin.</p>
+<p>The <a href="https://github.com/rsilvestre/ssm-ssh-tools#the-proxycommand">full breakdown of that config</a> — including why it needs the <code>sh -c</code> wrapper, why the PATH must be literal, and why <code>aws sso login</code> needs <code>&gt;&amp;2</code> — is in the repo README.</p>
+<h2>Getting it</h2>
+<pre><code>git clone https://github.com/rsilvestre/ssm-ssh-tools.git
+cd ssm-ssh-tools &amp;&amp; chmod +x ssm-instances.sh
+alias inst=$PWD/ssm-instances.sh</code></pre>
+<p>Needs bash, the AWS CLI v2, and the Session Manager plugin. <code>fzf</code> is optional — without it you get a numbered menu. There is a PowerShell port for Windows, and it runs under WSL2 and Git Bash too.</p>
+<p>A few things that did not fit above:</p>
+<ul>
+<li><strong><code>SSM_HOST_PREFIX</code></strong> narrows it to one project if your ssh config has many hosts. <code>SSM_REGION</code>, <code>SSM_SSH_CONFIG</code> and <code>SSM_AWS_BIN</code> cover the rest.</li>
+<li><strong><code>hosts</code></strong> emits tab-separated <code>host / instance / profile</code> for scripting against.</li>
+<li><strong>Exit codes are specific</strong> — <code>3</code> credentials, <code>4</code> instance does not exist, <code>7</code> started but SSM never registered — so a wrapper can tell &quot;your token expired&quot; from &quot;that instance is gone&quot;.</li>
+<li><strong>Host keys use <code>accept-new</code></strong>, so a rebuilt instance with a new ID does not fail verification under <code>BatchMode</code>, while a <em>changed</em> key on a known host still errors as it should.</li>
+</ul>
+<hr>
+<p><em>Scripts and full docs: <a href="https://github.com/rsilvestre/ssm-ssh-tools">github.com/rsilvestre/ssm-ssh-tools</a></em></p>
