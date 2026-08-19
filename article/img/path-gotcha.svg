@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="620" viewBox="0 0 1400 620" font-family="Menlo, DejaVu Sans Mono, monospace">
+  <rect width="1400" height="620" fill="#faf8f5"/>
+
+  <text x="70" y="66" font-size="26" font-family="Georgia, serif" fill="#1c1a17">Same command. Same machine. Different PATH.</text>
+  <line x1="70" y1="94" x2="1330" y2="94" stroke="#e0dbd2" stroke-width="2"/>
+
+  <!-- TERMINAL -->
+  <text x="70" y="146" font-size="18" fill="#1f7a4d" letter-spacing="2">FROM YOUR TERMINAL</text>
+  <rect x="70" y="168" width="590" height="188" rx="6" fill="#f1f5f2" stroke="#1f7a4d" stroke-width="2"/>
+  <text x="96" y="204" font-size="15" fill="#57514a">PATH inherited from ~/.zshrc</text>
+  <text x="96" y="240" font-size="15" fill="#1f7a4d">/opt/homebrew/bin</text>
+  <text x="96" y="266" font-size="15" fill="#1f7a4d">/usr/local/bin</text>
+  <text x="96" y="292" font-size="15" fill="#8a8177">/usr/bin  /bin  /usr/sbin  /sbin</text>
+  <text x="96" y="332" font-size="16" fill="#1f7a4d">✓ session-manager-plugin found</text>
+
+  <!-- EDITOR -->
+  <text x="740" y="146" font-size="18" fill="#8c2f2f" letter-spacing="2">FROM CURSOR / VS CODE</text>
+  <rect x="740" y="168" width="590" height="188" rx="6" fill="#f7ecec" stroke="#8c2f2f" stroke-width="2"/>
+  <text x="766" y="204" font-size="15" fill="#57514a">PATH inherited from the Dock</text>
+  <text x="766" y="240" font-size="15" fill="#8a8177">/usr/bin  /bin  /usr/sbin  /sbin</text>
+  <text x="766" y="292" font-size="15" fill="#8c2f2f">(no homebrew, no /usr/local/bin)</text>
+  <text x="766" y="332" font-size="16" fill="#8c2f2f">✗ SessionManagerPlugin is not found</text>
+
+  <!-- the trap -->
+  <rect x="70" y="404" width="1260" height="88" rx="6" fill="#faf8f5" stroke="#b0541f" stroke-width="2"/>
+  <text x="96" y="440" font-size="16" fill="#b0541f">The trap: an absolute path to `aws` does NOT fix this.</text>
+  <text x="96" y="470" font-size="15" fill="#57514a">The CLI finds aws, then does its own separate PATH lookup for the plugin.</text>
+
+  <!-- fix -->
+  <text x="70" y="546" font-size="15" fill="#8a8177">The fix — set PATH inside the ProxyCommand:</text>
+  <rect x="70" y="560" width="1260" height="40" rx="4" fill="#f2eee8" stroke="#e0dbd2" stroke-width="1.5"/>
+  <text x="90" y="586" font-size="15" fill="#2d2822">sh -c "export PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin; ..."</text>
+</svg>
